@@ -112,8 +112,8 @@ N_max = np.nanmax(N_profile)
 z_max = median_depths[np.nanargmax(N_profile)]
 
 plt.figure(figsize=(5, 7))
-plt.plot(N_profile, median_depths, color="darkcyan", marker="o", lw=1.5, markersize=5, label="N(z)")
-plt.scatter(N_max, z_max, s=100, color="red", zorder=5,
+plt.plot(N_profile, median_depths, color="darkcyan", lw=1.5, label="N(z)")
+plt.scatter(N_max, z_max, s=40, color="red", zorder=5,
             label=f"Nmax = {N_max:.3e} 1/с\nz = {z_max:.1f} м")
 plt.gca().invert_yaxis()
 plt.xlabel("N(z), 1/с")
@@ -285,8 +285,8 @@ for idx, T_iso in enumerate(iso_values):
     # --- Модель Гарретта–Манка: S(f,z) = C_M·f_in·√(f²−f_in²) / (N(z)·f³) ---
     N_iso = (np.interp(z_mean, median_depths, N_profile) / (2 * np.pi)) * 3600
     S_GM = np.zeros_like(f_psd)
-    mg = (f_psd > fin) & (f_psd < N_iso)
-    S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
+    mg = (f_psd > 0) & (f_psd < N_iso)
+    S_GM[mg] = C_M * (fin * np.sqrt(np.clip(f_psd[mg] ** 2 - fin ** 2, 0, None))) / (N_iso * f_psd[mg] ** 3)
 
     print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.4f} ч⁻¹")
 
