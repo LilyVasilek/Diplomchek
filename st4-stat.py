@@ -165,16 +165,18 @@ cf = ax7.contourf(TT, DD, temps_30s.T, 20, cmap="viridis")
 ax7.invert_yaxis()
 plt.colorbar(cf, ax=ax7, label="Температура, °C")
 label_positions = [0.25, 0.50, 0.75]
+iso_field_colors = ["#FFFFFF", "#D0D0D0", "#A0A0A0"]
 for idx, T_iso in enumerate(iso_values):
     z_iso = iso_depths[T_iso]
-    ax7.plot(time_30s, z_iso, color="white", lw=0.8, label=f"{T_iso}°C ({iso_labels[idx]})")
+    ic = iso_field_colors[idx]
+    ax7.plot(time_30s, z_iso, color=ic, lw=0.8, label=f"{T_iso}°C ({iso_labels[idx]})")
     valid_idx = np.where(~np.isnan(z_iso))[0]
     if len(valid_idx) > 0:
         pos = int(len(valid_idx) * label_positions[idx])
         pos = min(pos, len(valid_idx) - 1)
         ti = valid_idx[pos]
         ax7.annotate(f" {T_iso}°C", xy=(time_30s[ti], z_iso[ti]),
-                     color="white", fontsize=9, fontweight="bold", va="bottom",
+                     color=ic, fontsize=9, fontweight="bold", va="bottom",
                      bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.5, ec="none"))
 ax7.set_ylabel("Глубина, м")
 ax7.set_xlabel("Дата")
@@ -253,7 +255,8 @@ C_M = 204.0
 #   2) PSD — три изотермы + модель Гарретта–Манка на одной сетке
 # =========================================================
 fig_sp, (ax_amp, ax_psd) = plt.subplots(2, 1, figsize=(12, 12), sharex=True)
-line_colors = ["m", "teal", "darkorange"]
+amp_colors = ["royalblue", "seagreen", "coral"]
+psd_colors = ["darkviolet", "sienna", "darkgoldenrod"]
 
 print(f"\nМодель Гарретта–Манка: S(f,z) = C_M·f_in·√(f²−f_in²) / (N(z)·f³)")
 print(f"  Модель определена в диапазоне f_in < f < N(z)")
@@ -287,24 +290,24 @@ for idx, T_iso in enumerate(iso_values):
 
     print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.4f} ч⁻¹")
 
-    col = line_colors[idx]
     lbl = f"{T_iso}°C ({iso_labels[idx]})"
 
     # --- 1) Амплитудный спектр ---
     mfft = (Fv > 0) & (amplitude > 0) & np.isfinite(amplitude)
     if np.any(mfft):
-        ax_amp.loglog(Fv[mfft], amplitude[mfft], color=col, lw=1, label=lbl)
+        ax_amp.loglog(Fv[mfft], amplitude[mfft], color=amp_colors[idx], lw=1, label=lbl)
 
     # --- 2) PSD ---
     mpsd = (f_psd > 0) & np.isfinite(Pxx) & (Pxx > 0)
     if np.any(mpsd):
-        ax_psd.loglog(f_psd[mpsd], Pxx[mpsd], color=col, lw=1, label=f"PSD {lbl}")
+        ax_psd.loglog(f_psd[mpsd], Pxx[mpsd], color=psd_colors[idx], lw=1, label=f"PSD {lbl}")
 
-    # --- Модель Г–М (для каждой изотермы — своя, т.к. N(z) на разных глубинах) ---
+    # --- Модель Г–М (чёрная, разные стили линий для различения) ---
+    gm_styles = ["-", "--", "-."]
     mgp = (f_psd > 0) & np.isfinite(S_GM) & (S_GM > 0)
     if np.any(mgp):
-        ax_psd.loglog(f_psd[mgp], S_GM[mgp], color=col, ls="-.", lw=2,
-                      alpha=0.7, label=f"Г–М {T_iso}°C (N={N_iso:.2f})")
+        ax_psd.loglog(f_psd[mgp], S_GM[mgp], color="black", ls=gm_styles[idx], lw=1.5,
+                      alpha=0.8, label=f"Г–М {T_iso}°C (N={N_iso:.2f})")
 
 # --- Пунктир частоты Вяйсяля–Брента ---
 N_mean = (np.nanmean(N_profile) / (2 * np.pi)) * 3600
