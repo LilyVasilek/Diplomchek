@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from scipy.interpolate import interp1d
+from scipy.signal import detrend, find_peaks
+from scipy.stats import norm, rayleigh, kstest, shapiro
 import gsw
 
 xlsx_path = r"C:\Документы\ДИПЛОМ\Химченко_данные\Термокосы\st4.xlsx"
@@ -79,6 +81,26 @@ for T_iso in iso_values:
     for t in range(len(time_30s)):
         z_iso.append(interp1d(temps_30s[t, :], median_depths, bounds_error=False, fill_value=np.nan)(T_iso))
     iso_depths[T_iso] = np.array(z_iso)
+
+# --- Температурное поле с изотермами (белые подписанные линии) ---
+fig_ti, ax_ti = plt.subplots(figsize=(12, 6))
+cf = ax_ti.contourf(TT, DD, temps_30s.T, 20, cmap="viridis")
+ax_ti.invert_yaxis()
+plt.colorbar(cf, ax=ax_ti, label="Температура, °C")
+for T_iso, z_iso in iso_depths.items():
+    ax_ti.plot(time_30s, z_iso, color="white", lw=1.5)
+    valid_idx = np.where(~np.isnan(z_iso))[0]
+    if len(valid_idx) > 0:
+        mid = valid_idx[len(valid_idx) // 2]
+        ax_ti.text(time_30s[mid], z_iso[mid], f" {T_iso}°C", color="white",
+                   fontsize=10, fontweight="bold", va="bottom")
+ax_ti.set_ylabel("Глубина, м")
+ax_ti.set_xlabel("Дата")
+ax_ti.set_title("Временная изменчивость температуры с изотермами")
+ax_ti.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+fig_ti.tight_layout()
+plt.show()
+
 plt.figure(figsize=(12, 6))
 for T_iso, z_iso in iso_depths.items():
     plt.plot(time_30s, z_iso, lw=1, label=f"{T_iso} °C")
@@ -117,6 +139,21 @@ def longest_continuous_segment(arr):
     if not segments:
         return None, None
     return segments[np.argmax([e - s for s, e in segments])]
+
+
+def common_continuous_interval(*arrays):
+    combined_valid = np.ones(len(arrays[0]), dtype=bool)
+    for arr in arrays:
+        combined_valid &= ~np.isnan(arr)
+    padded = np.concatenate(([False], combined_valid, [False]))
+    d = np.diff(padded.astype(int))
+    starts = np.where(d == 1)[0]
+    ends = np.where(d == -1)[0]
+    if len(starts) == 0:
+        return None, None
+    lengths = ends - starts
+    best = np.argmax(lengths)
+    return starts[best], ends[best]
 
 
 def _ascii_log_spectrum(title, series, x0, x1, y0, y1, vlines, w=78, h=14):
@@ -206,131 +243,328 @@ Omega = 7.2921e-5
 fin = (2 * Omega * np.sin(np.deg2rad(lat)) / (2 * np.pi)) * 3600
 C_M, f17 = 204.0, 1 / 17.1
 
-for T_iso, z_iso in iso_depths.items():
-    start, end = longest_continuous_segment(z_iso)
-    if start is None:
-        print(f"{T_iso} °C — нет непрерывных данных")
-        continue
-    z_segment = z_iso[start:end]
-    if len(z_segment) < 512:
-        print(f"{T_iso} °C — слишком короткий сегмент")
-        continue
-    signal = z_segment - np.nanmean(z_segment)
-    z_mean = np.nanmean(z_segment)
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7))
-    ax1.plot(time_30s, z_iso, lw=1)
-    ax1.axvspan(time_30s[start], time_30s[end - 1], color="orange", alpha=0.25)
-    ax1.invert_yaxis()
-    ax1.set_ylabel("Глубина, м")
-    ax1.set_title(f"{T_iso} °C: z_iso")
-    ax1.grid(True, ls="--", alpha=0.4)
-    ax2.plot(time_30s[start:end], z_segment, lw=1)
-    ax2.axhline(z_mean, color="red", ls="--", lw=1, label=f"Средняя глубина участка z̄ = {z_mean:.1f} м")
-    ax2.invert_yaxis()
-    ax2.set_ylabel("Глубина, м")
-    ax2.set_title(f"Непрерывный участок ({end - start} точ.)")
-    ax2.grid(True, ls="--", alpha=0.4)
-    ax2.legend(fontsize=9, loc="best")
-    ax2.set_xlabel("")
-    dfmt = mdates.DateFormatter("%d.%m\n%H:%M")
-    t0, t1 = time_30s[start].to_pydatetime(), time_30s[end - 1].to_pydatetime()
-    dh = (t1 - t0).total_seconds() / 3600.0
-    dloc = mdates.HourLocator(interval=2) if dh <= 12 else mdates.HourLocator(interval=6) if dh <= 48 else mdates.DayLocator(interval=1)
-    for ax in (ax1, ax2):
-        ax.xaxis.set_major_locator(dloc)
-        ax.xaxis.set_major_formatter(dfmt)
-    ax1.tick_params(axis="x", labelbottom=False)
-    plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
-    seg_h = ((end - start - 1) * dt / 3600.0) if (end - start) >= 2 else 0.0
-    n17 = seg_h / 17.1 if 17.1 > 0 else np.nan
-    n17i = int(np.floor(n17)) if np.isfinite(n17) else None
-    fig.suptitle(f"Выбор участка для изотермы {T_iso} °C", y=1.02)
-    fig.text(0.5, 0.01, f"Сегмент длительность: {seg_h:.2f} ч. Период 17.1 ч укладывается: {n17:.2f} раза (целых: {n17i}).", ha="center", va="bottom", fontsize=10)
-    plt.tight_layout()
-    plt.show()
+# =========================================================
+# ОБЩИЙ НЕПРЕРЫВНЫЙ ИНТЕРВАЛ ДЛЯ ТРЁХ ИЗОТЕРМ
+# =========================================================
+iso_arrays = [iso_depths[T] for T in iso_values]
+c_start, c_end = common_continuous_interval(*iso_arrays)
 
-    Npsd = len(signal)
-    f_hz = np.fft.rfftfreq(Npsd, d=dt)
-    f = f_hz * 3600.0
-    fa = 1.0 / dt
-    X = np.fft.rfft(signal)
-    Pxx = ((1.0 / (Npsd * fa)) * (np.abs(X) ** 2)) / 3600.0
-    N_iso = (np.interp(z_mean, median_depths, N_profile) / (2 * np.pi)) * 3600
-    S_GM = np.zeros_like(f)
-    mg = (f > fin) & (f < N_iso)
-    S_GM[mg] = C_M * (fin * np.sqrt(f[mg] ** 2 - fin ** 2)) / (N_iso * f[mg] ** 3)
-    N = len(z_segment)
-    Feta = np.fft.fft(z_segment) / N
-    Fv = np.linspace(0, Fn, N // 2 + 1)
-    amplitude = 2 * np.abs(Feta[: len(Fv)])
+if c_start is None:
+    print("Нет общего непрерывного участка для трёх изотерм!")
+else:
+    seg_len = c_end - c_start
+    seg_hours = (seg_len - 1) * dt / 3600.0
+    print(f"\nОбщий непрерывный участок: индексы {c_start}–{c_end-1}, "
+          f"длина {seg_len} точек ({seg_hours:.1f} часов)")
 
-    try:
-        fig_sp, (ax_fft, ax_psd) = plt.subplots(2, 1, figsize=(10, 11), sharex=True)
-        mfft = (Fv > 0) & (amplitude > 0) & np.isfinite(amplitude)
-        f_fft, amp_fft = Fv[mfft], amplitude[mfft]
-        ax_fft.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
-        ax_fft.axvline(N_iso, color="black", ls="--", lw=1, label="N(z) — частота Вяйсяля–Брента")
-        if f_fft.size > 0:
-            ax_fft.loglog(f_fft, amp_fft, "m", lw=1, label="FFT (амплитуда)")
+    fig_common, axes_common = plt.subplots(len(iso_values), 2,
+                                           figsize=(14, 5 * len(iso_values)),
+                                           squeeze=False)
+    slopes_info = []
+
+    for idx, T_iso in enumerate(iso_values):
+        z_iso = iso_depths[T_iso]
+        z_segment = z_iso[c_start:c_end]
+        z_mean = np.nanmean(z_segment)
+
+        # Убираем тренд (линейный), а не среднее
+        signal = detrend(z_segment, type='linear')
+
+        # --- FFT (алгоритм без изменений) ---
+        N_pts = len(signal)
+        Feta = np.fft.fft(signal) / N_pts
+        Fv = np.linspace(0, Fn, N_pts // 2 + 1)
+        amplitude = 2 * np.abs(Feta[:len(Fv)])
+
+        # --- PSD (алгоритм без изменений) ---
+        Npsd = len(signal)
+        f_hz = np.fft.rfftfreq(Npsd, d=dt)
+        f_psd = f_hz * 3600.0
+        fa = 1.0 / dt
+        X = np.fft.rfft(signal)
+        Pxx = ((1.0 / (Npsd * fa)) * (np.abs(X) ** 2)) / 3600.0
+
+        # --- Гарретт–Мунк ---
+        N_iso = (np.interp(z_mean, median_depths, N_profile) / (2 * np.pi)) * 3600
+        S_GM = np.zeros_like(f_psd)
+        mg = (f_psd > fin) & (f_psd < N_iso)
+        S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
+
+        # --- Оценка наклона спектра (линейная регрессия в log-log) ---
+        mask_slope = (f_psd > 0) & (Pxx > 0) & np.isfinite(f_psd) & np.isfinite(Pxx)
+        if np.sum(mask_slope) >= 2:
+            log_f = np.log10(f_psd[mask_slope])
+            log_P = np.log10(Pxx[mask_slope])
+            slope, intercept = np.polyfit(log_f, log_P, 1)
         else:
-            ax_fft.text(0.5, 0.5, "Нет данных для FFT\n(проверить NaN/сегмент)", transform=ax_fft.transAxes, ha="center", va="center")
+            slope, intercept = np.nan, np.nan
+        slopes_info.append((T_iso, slope))
+        print(f"  Изотерма {T_iso}°C: наклон спектра = {slope:.2f}")
+
+        # --- FFT график ---
+        ax_fft = axes_common[idx, 0]
+        mfft = (Fv > 0) & (amplitude > 0) & np.isfinite(amplitude)
+        if np.any(mfft):
+            ax_fft.loglog(Fv[mfft], amplitude[mfft], "m", lw=1, label="FFT (амплитуда)")
+        ax_fft.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
+        ax_fft.axvline(N_iso, color="black", ls="--", lw=1, label="N(z)")
         ax_fft.grid(True, which="both")
         ax_fft.set_ylabel("Амплитуда FFT, м")
-        ax_fft.set_title(f"{T_iso} °C, спектры, z̄≈{z_mean:.1f} м")
-        ax_fft.legend(fontsize=9, loc="best")
-        mpsd = (f > 0) & np.isfinite(Pxx) & (Pxx > 0)
-        mgp = (f > 0) & np.isfinite(S_GM) & (S_GM > 0)
-        ax_psd.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
-        ax_psd.axvline(N_iso, color="black", ls="--", lw=1, label="N(z) — частота Вяйсяля–Брента")
+        ax_fft.set_title(f"{T_iso}°C, FFT, z̄≈{z_mean:.1f} м")
+        ax_fft.legend(fontsize=8, loc="best")
+
+        # --- PSD график ---
+        ax_psd = axes_common[idx, 1]
+        mpsd_m = (f_psd > 0) & np.isfinite(Pxx) & (Pxx > 0)
+        mgp = (f_psd > 0) & np.isfinite(S_GM) & (S_GM > 0)
+        if np.any(mpsd_m):
+            ax_psd.loglog(f_psd[mpsd_m], Pxx[mpsd_m], "k", lw=1, label="PSD (периодограмма)")
         if np.any(mgp):
-            ax_psd.loglog(f[mgp], S_GM[mgp], "b-.", lw=2, label="Модель Гарретта–Манка")
-        if np.any(mpsd):
-            ax_psd.loglog(f[mpsd], Pxx[mpsd], "k", lw=1, label="PSD по DFT (периодограмма)")
-        if not np.any(mpsd) and not np.any(mgp):
-            ax_psd.text(0.5, 0.5, "Нет данных для PSD\n(проверить NaN/диапазон f)", transform=ax_psd.transAxes, ha="center", va="center")
+            ax_psd.loglog(f_psd[mgp], S_GM[mgp], "b-.", lw=2, label="Модель Гарретта–Манка")
+        if np.isfinite(slope):
+            f_fit = f_psd[mask_slope]
+            P_fit = 10 ** (intercept + slope * np.log10(f_fit))
+            ax_psd.loglog(f_fit, P_fit, "r--", lw=1.5, label=f"Наклон = {slope:.2f}")
+        ax_psd.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
+        ax_psd.axvline(N_iso, color="black", ls="--", lw=1, label="N(z)")
         ax_psd.grid(True, which="both")
         ax_psd.set_xlabel("Частота, 1/час")
-        ax_psd.set_ylabel("PSD, м²·час (для оси 1/час)")
-        ax_psd.legend(fontsize=9, loc="best")
-        xmin = max(fin, np.nanmin(f[f > 0])) if np.any(f > 0) else fin
-        xmax = max(np.nanmax(f), np.nanmax(Fv))
-        if np.isfinite(xmin) and np.isfinite(xmax) and xmax > xmin:
-            xleft = xmin * 0.52
-            if f17 > 0 and xleft >= f17 * 0.96:
-                xleft = f17 * 0.50
-            if xleft > 0 and xleft < xmax:
-                ax_fft.set_xlim([xleft, xmax])
-                ax_psd.set_xlim([xleft, xmax])
-        yc = []
-        if f_fft.size > 0:
-            yv = amp_fft[np.isfinite(amp_fft) & (amp_fft > 0)]
-            if yv.size > 0:
-                yc.append(yv)
-        if np.any(mpsd):
-            yc.append(Pxx[mpsd])
-        if np.any(mgp):
-            yc.append(S_GM[mgp])
-        if yc:
-            ya = np.concatenate([np.ravel(v) for v in yc if v is not None and len(v) > 0])
-            ya = ya[(ya > 0) & np.isfinite(ya)]
-            if ya.size > 0:
-                ymin, ymax = np.nanmin(ya), np.nanmax(ya)
-                ax_fft.set_ylim([ymin * 0.65, ymax * 1.45])
-                ax_psd.set_ylim([ymin * 0.65, ymax * 1.45])
-        try:
-            ax_fft.text(f17, ax_fft.get_ylim()[1] * 0.7, "17.1 ч", rotation=90, color="gray", va="bottom", ha="right")
-        except Exception:
-            pass
-        _print_spectra_console(
-            T_iso, f_fft, amp_fft, f, Pxx, S_GM, mpsd, mgp,
-            *ax_fft.get_xlim(), *ax_fft.get_ylim(), f17, N_iso,
-        )
-        fig_sp.suptitle(f"Выбранный участок: {T_iso} °C (длина сегмента = {end - start} точ.)", y=1.02)
-        fig_sp.tight_layout()
+        ax_psd.set_ylabel("PSD, м²·час")
+        ax_psd.set_title(f"{T_iso}°C, PSD + наклон, z̄≈{z_mean:.1f} м")
+        ax_psd.legend(fontsize=8, loc="best")
+
+    fig_common.suptitle(f"Спектры на общем участке ({seg_len} точ., {seg_hours:.1f} ч)",
+                        y=1.02)
+    fig_common.tight_layout()
+    plt.show()
+
+    print("\n--- Сводка наклонов спектров ---")
+    for T_iso, sl in slopes_info:
+        print(f"  {T_iso}°C: наклон = {sl:.2f}")
+
+# =========================================================
+# ЛУЧШАЯ ИЗОТЕРМА (САМЫЙ ДЛИННЫЙ НЕПРЕРЫВНЫЙ УЧАСТОК)
+# =========================================================
+best_iso = None
+best_len = 0
+best_start, best_end = None, None
+
+for T_iso in iso_values:
+    z_iso = iso_depths[T_iso]
+    s, e = longest_continuous_segment(z_iso)
+    if s is not None:
+        length = e - s
+        print(f"Изотерма {T_iso}°C: непрерывный участок {length} точек")
+        if length > best_len:
+            best_len = length
+            best_iso = T_iso
+            best_start, best_end = s, e
+
+if best_iso is None:
+    print("Нет непрерывных участков ни для одной изотермы!")
+else:
+    print(f"\nЛучшая изотерма: {best_iso}°C (длина {best_len} точек, "
+          f"{(best_len - 1) * dt / 3600:.1f} часов)")
+
+    z_best = iso_depths[best_iso]
+    z_segment = z_best[best_start:best_end]
+    z_mean = np.nanmean(z_segment)
+    t_segment = time_30s[best_start:best_end]
+
+    # --- Профиль по глубине ---
+    fig_prof, ax_prof = plt.subplots(figsize=(14, 5))
+    ax_prof.plot(t_segment, z_segment, lw=1, color="teal")
+    ax_prof.axhline(z_mean, color="red", ls="--", lw=1,
+                    label=f"Средняя глубина z̄ = {z_mean:.1f} м")
+    ax_prof.invert_yaxis()
+    ax_prof.set_ylabel("Глубина, м")
+    ax_prof.set_xlabel("Время")
+    ax_prof.set_title(f"Профиль глубины изотермы {best_iso}°C (лучшая)")
+    ax_prof.grid(True, ls="--", alpha=0.4)
+    ax_prof.legend()
+    ax_prof.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+    fig_prof.tight_layout()
+    plt.show()
+
+    # --- Спектры для лучшей изотермы (убираем тренд) ---
+    signal_best = detrend(z_segment, type='linear')
+
+    N_pts = len(signal_best)
+    Feta = np.fft.fft(signal_best) / N_pts
+    Fv = np.linspace(0, Fn, N_pts // 2 + 1)
+    amplitude = 2 * np.abs(Feta[:len(Fv)])
+
+    Npsd = len(signal_best)
+    f_hz = np.fft.rfftfreq(Npsd, d=dt)
+    f_psd = f_hz * 3600.0
+    fa = 1.0 / dt
+    X_best = np.fft.rfft(signal_best)
+    Pxx_best = ((1.0 / (Npsd * fa)) * (np.abs(X_best) ** 2)) / 3600.0
+
+    N_iso = (np.interp(z_mean, median_depths, N_profile) / (2 * np.pi)) * 3600
+    S_GM = np.zeros_like(f_psd)
+    mg = (f_psd > fin) & (f_psd < N_iso)
+    S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
+
+    fig_best_sp, (ax_fft, ax_psd) = plt.subplots(2, 1, figsize=(10, 11), sharex=True)
+    mfft = (Fv > 0) & (amplitude > 0) & np.isfinite(amplitude)
+    f_fft, amp_fft = Fv[mfft], amplitude[mfft]
+    ax_fft.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
+    ax_fft.axvline(N_iso, color="black", ls="--", lw=1, label="N(z) — частота Вяйсяля–Брента")
+    if f_fft.size > 0:
+        ax_fft.loglog(f_fft, amp_fft, "m", lw=1, label="FFT (амплитуда)")
+    ax_fft.grid(True, which="both")
+    ax_fft.set_ylabel("Амплитуда FFT, м")
+    ax_fft.set_title(f"Лучшая изотерма {best_iso}°C, спектры, z̄≈{z_mean:.1f} м")
+    ax_fft.legend(fontsize=9, loc="best")
+
+    mpsd = (f_psd > 0) & np.isfinite(Pxx_best) & (Pxx_best > 0)
+    mgp = (f_psd > 0) & np.isfinite(S_GM) & (S_GM > 0)
+    ax_psd.axvline(f17, color="gray", ls="--", lw=1, label="17.1 ч")
+    ax_psd.axvline(N_iso, color="black", ls="--", lw=1, label="N(z) — частота Вяйсяля–Брента")
+    if np.any(mgp):
+        ax_psd.loglog(f_psd[mgp], S_GM[mgp], "b-.", lw=2, label="Модель Гарретта–Манка")
+    if np.any(mpsd):
+        ax_psd.loglog(f_psd[mpsd], Pxx_best[mpsd], "k", lw=1, label="PSD по DFT (периодограмма)")
+    ax_psd.grid(True, which="both")
+    ax_psd.set_xlabel("Частота, 1/час")
+    ax_psd.set_ylabel("PSD, м²·час")
+    ax_psd.legend(fontsize=9, loc="best")
+
+    _print_spectra_console(
+        best_iso, f_fft, amp_fft, f_psd, Pxx_best, S_GM, mpsd, mgp,
+        *ax_fft.get_xlim(), *ax_fft.get_ylim(), f17, N_iso,
+    )
+
+    fig_best_sp.suptitle(f"Спектры лучшей изотермы {best_iso}°C ({best_len} точ.)", y=1.02)
+    fig_best_sp.tight_layout()
+    plt.show()
+
+    # =========================================================
+    # ВЫДЕЛЕНИЕ КОРОТКОПЕРИОДНЫХ ВОЛН (ВЫСОТА > 0.5 М)
+    # =========================================================
+    peaks_idx, _ = find_peaks(signal_best, distance=2)
+
+    wave_heights = []
+    wave_periods_h = []
+
+    for i in range(len(peaks_idx) - 1):
+        p1 = peaks_idx[i]
+        p2 = peaks_idx[i + 1]
+        seg = signal_best[p1:p2 + 1]
+        h = np.max(seg) - np.min(seg)
+        period_s = (p2 - p1) * dt
+        wave_heights.append(h)
+        wave_periods_h.append(period_s / 3600.0)
+
+    wave_heights = np.array(wave_heights)
+    wave_periods_h = np.array(wave_periods_h)
+
+    mask_05 = wave_heights > 0.5
+    heights_05 = wave_heights[mask_05]
+    periods_05 = wave_periods_h[mask_05]
+
+    print(f"\n{'=' * 60}")
+    print(f"СТАТИСТИКА КОРОТКОПЕРИОДНЫХ ВОЛН (h > 0.5 м)")
+    print(f"{'=' * 60}")
+    print(f"Всего выделено волн: {len(wave_heights)}")
+    print(f"Волн с высотой > 0.5 м: {len(heights_05)}")
+
+    if len(heights_05) > 0:
+        print(f"\nВысота волн (м):")
+        print(f"  среднее  = {np.mean(heights_05):.3f}")
+        print(f"  медиана  = {np.median(heights_05):.3f}")
+        print(f"  стд.откл = {np.std(heights_05):.3f}")
+        print(f"  мин      = {np.min(heights_05):.3f}")
+        print(f"  макс     = {np.max(heights_05):.3f}")
+
+        print(f"\nПериод волн (часы):")
+        print(f"  среднее  = {np.mean(periods_05):.4f}")
+        print(f"  медиана  = {np.median(periods_05):.4f}")
+        print(f"  стд.откл = {np.std(periods_05):.4f}")
+        print(f"  мин      = {np.min(periods_05):.4f}")
+        print(f"  макс     = {np.max(periods_05):.4f}")
+
+        # --- Гистограммы ---
+        fig_hist, (ax_h, ax_p) = plt.subplots(1, 2, figsize=(12, 5))
+        ax_h.hist(heights_05, bins='auto', edgecolor='black', alpha=0.7, density=True)
+        ax_h.set_xlabel("Высота волны, м")
+        ax_h.set_ylabel("Плотность вероятности")
+        ax_h.set_title(f"Распределение высот волн (h > 0.5 м, N={len(heights_05)})")
+        ax_h.grid(True, alpha=0.3)
+
+        ax_p.hist(periods_05, bins='auto', edgecolor='black', alpha=0.7, density=True)
+        ax_p.set_xlabel("Период волны, ч")
+        ax_p.set_ylabel("Плотность вероятности")
+        ax_p.set_title(f"Распределение периодов волн (h > 0.5 м, N={len(periods_05)})")
+        ax_p.grid(True, alpha=0.3)
+        fig_hist.tight_layout()
         plt.show()
-    except Exception as e:
-        fig_err, ax_err = plt.subplots(1, 1, figsize=(9, 4))
-        ax_err.axis("off")
-        ax_err.text(0.02, 0.9, f"Ошибка при построении спектров для изотермы {T_iso} °C:\n{type(e).__name__}: {e}", ha="left", va="top", fontsize=11)
-        ax_err.text(0.02, 0.5, "Пожалуйста, скопируйте текст ошибки.", ha="left", va="top", fontsize=10)
+
+        # --- Оценка распределений ---
+        mu_h, std_h = norm.fit(heights_05)
+        ray_loc_h, ray_scale_h = rayleigh.fit(heights_05)
+
+        x_h = np.linspace(heights_05.min() * 0.9, heights_05.max() * 1.1, 200)
+
+        fig_dist, (ax_d1, ax_d2) = plt.subplots(1, 2, figsize=(13, 5))
+        ax_d1.hist(heights_05, bins='auto', density=True, alpha=0.5, edgecolor='black',
+                   label='Данные')
+        ax_d1.plot(x_h, norm.pdf(x_h, mu_h, std_h), 'r-', lw=2,
+                   label=f'Норм. (μ={mu_h:.2f}, σ={std_h:.2f})')
+        ax_d1.plot(x_h, rayleigh.pdf(x_h, ray_loc_h, ray_scale_h), 'g-', lw=2,
+                   label=f'Рэлей (loc={ray_loc_h:.2f}, sc={ray_scale_h:.2f})')
+        ax_d1.set_xlabel("Высота волны, м")
+        ax_d1.set_ylabel("Плотность")
+        ax_d1.set_title("Оценка распределений высот")
+        ax_d1.legend(fontsize=8)
+        ax_d1.grid(True, alpha=0.3)
+
+        mu_p, std_p = norm.fit(periods_05)
+        ray_loc_p, ray_scale_p = rayleigh.fit(periods_05)
+
+        x_p = np.linspace(periods_05.min() * 0.9, periods_05.max() * 1.1, 200)
+        ax_d2.hist(periods_05, bins='auto', density=True, alpha=0.5, edgecolor='black',
+                   label='Данные')
+        ax_d2.plot(x_p, norm.pdf(x_p, mu_p, std_p), 'r-', lw=2,
+                   label=f'Норм. (μ={mu_p:.2f}, σ={std_p:.2f})')
+        ax_d2.plot(x_p, rayleigh.pdf(x_p, ray_loc_p, ray_scale_p), 'g-', lw=2,
+                   label=f'Рэлей (loc={ray_loc_p:.2f}, sc={ray_scale_p:.2f})')
+        ax_d2.set_xlabel("Период волны, ч")
+        ax_d2.set_ylabel("Плотность")
+        ax_d2.set_title("Оценка распределений периодов")
+        ax_d2.legend(fontsize=8)
+        ax_d2.grid(True, alpha=0.3)
+        fig_dist.tight_layout()
         plt.show()
+
+        # --- Проверка гипотез о принадлежности распределению ---
+        print(f"\n{'=' * 60}")
+        print("ПРОВЕРКА ГИПОТЕЗ О ПРИНАДЛЕЖНОСТИ РАСПРЕДЕЛЕНИЮ")
+        print(f"{'=' * 60}")
+
+        print("\nВысоты волн:")
+        ks_n_stat, ks_n_p = kstest(heights_05, 'norm', args=(mu_h, std_h))
+        print(f"  KS-тест (нормальное):  D={ks_n_stat:.4f}, p={ks_n_p:.4f}"
+              f"  {'не отвергается' if ks_n_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+        ks_r_stat, ks_r_p = kstest(heights_05, 'rayleigh', args=(ray_loc_h, ray_scale_h))
+        print(f"  KS-тест (Рэлей):      D={ks_r_stat:.4f}, p={ks_r_p:.4f}"
+              f"  {'не отвергается' if ks_r_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+        if 3 <= len(heights_05) <= 5000:
+            sw_stat, sw_p = shapiro(heights_05)
+            print(f"  Шапиро–Уилк (норм.):  W={sw_stat:.4f}, p={sw_p:.4f}"
+                  f"  {'не отвергается' if sw_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+
+        print("\nПериоды волн:")
+        ks_n_stat_p, ks_n_p_p = kstest(periods_05, 'norm', args=(mu_p, std_p))
+        print(f"  KS-тест (нормальное):  D={ks_n_stat_p:.4f}, p={ks_n_p_p:.4f}"
+              f"  {'не отвергается' if ks_n_p_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+        ks_r_stat_p, ks_r_p_p = kstest(periods_05, 'rayleigh', args=(ray_loc_p, ray_scale_p))
+        print(f"  KS-тест (Рэлей):      D={ks_r_stat_p:.4f}, p={ks_r_p_p:.4f}"
+              f"  {'не отвергается' if ks_r_p_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+        if 3 <= len(periods_05) <= 5000:
+            sw_stat_p, sw_p_p = shapiro(periods_05)
+            print(f"  Шапиро–Уилк (норм.):  W={sw_stat_p:.4f}, p={sw_p_p:.4f}"
+                  f"  {'не отвергается' if sw_p_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+    else:
+        print("Волн с высотой > 0.5 м не обнаружено.")
