@@ -112,7 +112,7 @@ N_max = np.nanmax(N_profile)
 z_max = median_depths[np.nanargmax(N_profile)]
 
 plt.figure(figsize=(5, 7))
-plt.plot(N_profile, median_depths, "b-o", lw=1.5, markersize=5, label="N(z)")
+plt.plot(N_profile, median_depths, color="darkcyan", marker="o", lw=1.5, markersize=5, label="N(z)")
 plt.scatter(N_max, z_max, s=100, color="red", zorder=5,
             label=f"Nmax = {N_max:.3e} 1/с\nz = {z_max:.1f} м")
 plt.gca().invert_yaxis()
@@ -125,23 +125,26 @@ plt.tight_layout()
 plt.show()
 
 # =========================================================
-# 5–6. АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ТРЁХ ИЗОТЕРМ
-#       (нижний, средний, верхний слои)
+# 5–6. ВЫБОР ТРЁХ ИЗОТЕРМ (верхний, средний, нижний слои)
 # =========================================================
 T_min = np.nanmin(temps_30s)
 T_max = np.nanmax(temps_30s)
 T_range = T_max - T_min
 T_third = T_range / 3.0
 
-iso_lower = round(T_min + T_third * 0.5)
-iso_middle = round(T_min + T_third * 1.5)
-iso_upper = round(T_min + T_third * 2.5)
+print(f"\nДиапазон температур: {T_min:.1f} – {T_max:.1f} °C")
+print(f"  Нижний слой:  {T_min:.1f} – {T_min + T_third:.1f} °C")
+print(f"  Средний слой: {T_min + T_third:.1f} – {T_min + 2*T_third:.1f} °C")
+print(f"  Верхний слой: {T_min + 2*T_third:.1f} – {T_max:.1f} °C")
+
+iso_upper = float(input("\nВведите изотерму верхнего слоя (°C): "))
+iso_middle = float(input("Введите изотерму среднего слоя (°C): "))
+iso_lower = float(input("Введите изотерму нижнего слоя (°C): "))
 
 iso_values = [iso_upper, iso_middle, iso_lower]
 iso_labels = ["верхний слой", "средний слой", "нижний слой"]
 
-print(f"\nДиапазон температур: {T_min:.1f} – {T_max:.1f} °C")
-print(f"Автоматически выбранные изотермы:")
+print(f"\nВыбранные изотермы:")
 for tv, lb in zip(iso_values, iso_labels):
     print(f"  {tv}°C  ({lb})")
 
@@ -156,22 +159,18 @@ for T_iso in iso_values:
 # =========================================================
 # 7. ПОЛЕ ТЕМПЕРАТУРЫ С ВЫДЕЛЕННЫМИ ИЗОТЕРМАМИ
 # =========================================================
-colors_iso = ["white", "cyan", "yellow"]
-
 fig7, ax7 = plt.subplots(figsize=(12, 6))
 cf = ax7.contourf(TT, DD, temps_30s.T, 20, cmap="viridis")
 ax7.invert_yaxis()
 plt.colorbar(cf, ax=ax7, label="Температура, °C")
 for idx, T_iso in enumerate(iso_values):
     z_iso = iso_depths[T_iso]
-    c = colors_iso[idx]
-    ax7.plot(time_30s, z_iso, color=c, lw=1.8, label=f"{T_iso}°C ({iso_labels[idx]})")
+    ax7.plot(time_30s, z_iso, color="white", lw=0.8, label=f"{T_iso}°C ({iso_labels[idx]})")
     valid_idx = np.where(~np.isnan(z_iso))[0]
     if len(valid_idx) > 0:
         mid = valid_idx[len(valid_idx) // 2]
         ax7.text(time_30s[mid], z_iso[mid], f" {T_iso}°C",
-                 color=c, fontsize=10, fontweight="bold", va="bottom",
-                 path_effects=[])
+                 color="white", fontsize=10, fontweight="bold", va="bottom")
 ax7.set_ylabel("Глубина, м")
 ax7.set_xlabel("Дата")
 ax7.set_title("Временная изменчивость температуры с изотермами")
@@ -209,11 +208,8 @@ if c_start is None:
 dt = 30
 seg_len = c_end - c_start
 seg_hours = (seg_len - 1) * dt / 3600.0
-n_17h = seg_hours / 17.1
-n_17h_int = int(np.floor(n_17h))
 
 print(f"\nОбщий непрерывный участок: {seg_len} точек, {seg_hours:.1f} часов")
-print(f"Период 17.1 ч укладывается: {n_17h:.2f} раз (целых: {n_17h_int})")
 
 fig8, ax8 = plt.subplots(figsize=(14, 5))
 for idx, T_iso in enumerate(iso_values):
@@ -231,8 +227,7 @@ ax8.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
 ax8.grid(True, alpha=0.3)
 ax8.legend(fontsize=9, loc="best")
 
-annotation_text = (f"Продолжительность: {seg_hours:.1f} ч\n"
-                   f"Период 17.1 ч: {n_17h:.1f}× (целых {n_17h_int})")
+annotation_text = f"Продолжительность: {seg_hours:.1f} ч"
 ax8.text(0.02, 0.02, annotation_text, transform=ax8.transAxes,
          fontsize=10, va="bottom", ha="left",
          bbox=dict(boxstyle="round,pad=0.4", fc="wheat", alpha=0.8))
@@ -245,7 +240,6 @@ plt.show()
 Fn = (1 / dt) * 3600 / 2
 Omega = 7.2921e-5
 fin = (2 * Omega * np.sin(np.deg2rad(lat)) / (2 * np.pi)) * 3600
-f17 = 1 / 17.1
 C_M = 204.0
 
 # =========================================================
@@ -301,23 +295,22 @@ for idx, T_iso in enumerate(iso_values):
         ax_psd.loglog(f_psd[mgp], S_GM[mgp], color=col, ls="-.", lw=2,
                       alpha=0.7, label=f"Г–М {T_iso}°C")
 
-# --- 11. Пунктирные линии: инерционная частота 17.1 ч и N(z) ---
+# --- Пунктир частоты Вяйсяля–Брента ---
 N_mean = (np.nanmean(N_profile) / (2 * np.pi)) * 3600
 
 for ax in (ax_amp, ax_psd):
-    ax.axvline(f17, color="gray", ls="--", lw=1.3)
     ax.axvline(N_mean, color="black", ls="--", lw=1.3)
 
-ax_amp.plot([], [], color="gray", ls="--", lw=1.3, label=f"f = 1/17.1 ч⁻¹ ({f17:.4f})")
-ax_amp.plot([], [], color="black", ls="--", lw=1.3, label=f"N(z) ≈ {N_mean:.2f} ч⁻¹")
+ax_amp.plot([], [], color="black", ls="--", lw=1.3,
+            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
 
 ax_amp.set_ylabel("Амплитуда, м")
 ax_amp.set_title("Амплитудные спектры изотерм (общий участок)")
 ax_amp.grid(True, which="both", alpha=0.3)
 ax_amp.legend(fontsize=8, loc="best")
 
-ax_psd.plot([], [], color="gray", ls="--", lw=1.3, label=f"f = 1/17.1 ч⁻¹")
-ax_psd.plot([], [], color="black", ls="--", lw=1.3, label=f"N(z) ≈ {N_mean:.2f} ч⁻¹")
+ax_psd.plot([], [], color="black", ls="--", lw=1.3,
+            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
 ax_psd.set_xlabel("Частота, 1/час")
 ax_psd.set_ylabel("PSD, м²·час")
 ax_psd.set_title("Спектральная плотность мощности + модель Гарретта–Манка (общий участок)")
