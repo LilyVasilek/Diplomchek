@@ -285,8 +285,8 @@ for idx, T_iso in enumerate(iso_values):
     # --- Модель Гарретта–Манка: S(f,z) = C_M·f_in·√(f²−f_in²) / (N(z)·f³) ---
     N_iso = (np.interp(z_mean, median_depths, N_profile) / (2 * np.pi)) * 3600
     S_GM = np.zeros_like(f_psd)
-    mg = (f_psd > 0) & (f_psd < N_iso)
-    S_GM[mg] = C_M * (fin * np.sqrt(np.clip(f_psd[mg] ** 2 - fin ** 2, 0, None))) / (N_iso * f_psd[mg] ** 3)
+    mg = (f_psd > fin) & (f_psd < N_iso)
+    S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
 
     print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.4f} ч⁻¹")
 
@@ -335,3 +335,331 @@ fig_sp.suptitle(f"Спектральный анализ на общем учас
                 y=1.01, fontsize=13)
 fig_sp.tight_layout()
 plt.show()
+
+# =========================================================
+# 12. ЛУЧШАЯ ИЗОТЕРМА (САМЫЙ ДЛИННЫЙ НЕПРЕРЫВНЫЙ УЧАСТОК)
+# =========================================================
+from scipy.signal import find_peaks, butter, filtfilt
+from scipy.stats import norm, rayleigh, kstest, shapiro
+
+
+def longest_continuous_segment(arr):
+    isnan, segments, start = np.isnan(arr), [], None
+    for i, val in enumerate(isnan):
+        if not val and start is None:
+            start = i
+        elif val and start is not None:
+            segments.append((start, i))
+            start = None
+    if start is not None:
+        segments.append((start, len(arr)))
+    if not segments:
+        return None, None
+    return segments[np.argmax([e - s for s, e in segments])]
+
+
+best_iso = None
+best_len = 0
+best_start, best_end = None, None
+
+for T_iso in iso_values:
+    z_iso = iso_depths[T_iso]
+    s, e = longest_continuous_segment(z_iso)
+    if s is not None:
+        length = e - s
+        print(f"Изотерма {T_iso}°C: непрерывный участок {length} точек "
+              f"({(length - 1) * dt / 3600:.1f} ч)")
+        if length > best_len:
+            best_len = length
+            best_iso = T_iso
+            best_start, best_end = s, e
+
+if best_iso is None:
+    raise RuntimeError("Нет непрерывных участков!")
+
+print(f"\nЛучшая изотерма: {best_iso}°C ({best_len} точек, "
+      f"{(best_len - 1) * dt / 3600:.1f} часов)")
+
+z_best = iso_depths[best_iso]
+z_segment = z_best[best_start:best_end]
+t_segment = time_30s[best_start:best_end]
+z_mean_best = np.nanmean(z_segment)
+
+# --- Профиль глубины лучшей изотермы ---
+fig_bp, ax_bp = plt.subplots(figsize=(14, 5))
+ax_bp.plot(t_segment, z_segment, lw=0.8, color="teal")
+ax_bp.axhline(z_mean_best, color="red", ls="--", lw=1,
+              label=f"z̄ = {z_mean_best:.1f} м")
+ax_bp.invert_yaxis()
+ax_bp.set_ylabel("Глубина, м")
+ax_bp.set_xlabel("Время")
+ax_bp.set_title(f"Глубина изотермы {best_iso}°C (лучшая, {best_len} точ.)")
+ax_bp.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+ax_bp.grid(True, alpha=0.3)
+ax_bp.legend()
+fig_bp.tight_layout()
+plt.show()
+
+# =========================================================
+# 13. ВЫДЕЛЕНИЕ ЦУГОВ КОРОТКОПЕРИОДНЫХ ВОЛН (3–5 МИН, h ≥ 0.5 М)
+# =========================================================
+signal_best = detrend(z_segment, type='linear')
+
+fs_hz = 1.0 / dt
+low_period_min = 3.0
+high_period_min = 5.0
+low_freq = 1.0 / (high_period_min * 60)
+high_freq = 1.0 / (low_period_min * 60)
+nyq = fs_hz / 2.0
+
+b_bp, a_bp = butter(3, [low_freq / nyq, high_freq / nyq], btype='band')
+filtered = filtfilt(b_bp, a_bp, signal_best)
+
+peaks_up, _ = find_peaks(filtered, distance=int(low_period_min * 60 / dt * 0.8))
+peaks_dn, _ = find_peaks(-filtered, distance=int(low_period_min * 60 / dt * 0.8))
+
+all_extrema = np.sort(np.concatenate([peaks_up, peaks_dn]))
+
+wave_heights = []
+wave_periods_s = []
+wave_center_idx = []
+
+for i in range(len(all_extrema) - 1):
+    i1, i2 = all_extrema[i], all_extrema[i + 1]
+    h = abs(filtered[i1] - filtered[i2])
+    period_s = (i2 - i1) * dt
+    period_min = period_s / 60.0
+    if low_period_min <= period_min <= high_period_min and h >= 0.5:
+        wave_heights.append(h)
+        wave_periods_s.append(period_s)
+        wave_center_idx.append((i1 + i2) // 2)
+
+wave_heights = np.array(wave_heights)
+wave_periods_min = np.array(wave_periods_s) / 60.0
+
+print(f"\n{'=' * 60}")
+print(f"КОРОТКОПЕРИОДНЫЕ ВОЛНЫ (3–5 мин, h ≥ 0.5 м)")
+print(f"{'=' * 60}")
+print(f"Обнаружено волн: {len(wave_heights)}")
+
+if len(wave_heights) == 0:
+    print("Волн не обнаружено. Пропуск статистики.")
+else:
+    # --- Статистика ---
+    print(f"\nВысоты волн (м):")
+    print(f"  среднее   = {np.mean(wave_heights):.3f}")
+    print(f"  медиана   = {np.median(wave_heights):.3f}")
+    print(f"  ст.откл.  = {np.std(wave_heights):.3f}")
+    print(f"  мин       = {np.min(wave_heights):.3f}")
+    print(f"  макс      = {np.max(wave_heights):.3f}")
+    print(f"  дисперсия = {np.var(wave_heights):.4f}")
+
+    print(f"\nПериоды волн (мин):")
+    print(f"  среднее   = {np.mean(wave_periods_min):.2f}")
+    print(f"  медиана   = {np.median(wave_periods_min):.2f}")
+    print(f"  ст.откл.  = {np.std(wave_periods_min):.2f}")
+    print(f"  мин       = {np.min(wave_periods_min):.2f}")
+    print(f"  макс      = {np.max(wave_periods_min):.2f}")
+
+    # --- Гистограммы ---
+    fig_hist, (ax_hh, ax_hp) = plt.subplots(1, 2, figsize=(12, 5))
+    ax_hh.hist(wave_heights, bins='auto', edgecolor='black', alpha=0.7, density=True)
+    ax_hh.set_xlabel("Высота волны, м")
+    ax_hh.set_ylabel("Плотность вероятности")
+    ax_hh.set_title(f"Распределение высот (N={len(wave_heights)})")
+    ax_hh.grid(True, alpha=0.3)
+
+    ax_hp.hist(wave_periods_min, bins='auto', edgecolor='black', alpha=0.7, density=True)
+    ax_hp.set_xlabel("Период волны, мин")
+    ax_hp.set_ylabel("Плотность вероятности")
+    ax_hp.set_title(f"Распределение периодов (N={len(wave_periods_min)})")
+    ax_hp.grid(True, alpha=0.3)
+    fig_hist.suptitle(f"Короткопериодные волны изотермы {best_iso}°C (3–5 мин, h ≥ 0.5 м)")
+    fig_hist.tight_layout()
+    plt.show()
+
+    # --- Подгонка распределений ---
+    mu_h, std_h = norm.fit(wave_heights)
+    ray_loc_h, ray_scale_h = rayleigh.fit(wave_heights)
+
+    fig_fit, (ax_f1, ax_f2) = plt.subplots(1, 2, figsize=(13, 5))
+    x_h = np.linspace(wave_heights.min() * 0.8, wave_heights.max() * 1.2, 200)
+    ax_f1.hist(wave_heights, bins='auto', density=True, alpha=0.5, edgecolor='black',
+               label='Данные')
+    ax_f1.plot(x_h, norm.pdf(x_h, mu_h, std_h), 'r-', lw=2,
+               label=f'Норм. (μ={mu_h:.2f}, σ={std_h:.2f})')
+    ax_f1.plot(x_h, rayleigh.pdf(x_h, ray_loc_h, ray_scale_h), 'g-', lw=2,
+               label=f'Рэлей (loc={ray_loc_h:.2f}, sc={ray_scale_h:.2f})')
+    ax_f1.set_xlabel("Высота, м")
+    ax_f1.set_ylabel("Плотность")
+    ax_f1.set_title("Подгонка распределений высот")
+    ax_f1.legend(fontsize=8)
+    ax_f1.grid(True, alpha=0.3)
+
+    mu_p, std_p = norm.fit(wave_periods_min)
+    ray_loc_p, ray_scale_p = rayleigh.fit(wave_periods_min)
+    x_p = np.linspace(wave_periods_min.min() * 0.8, wave_periods_min.max() * 1.2, 200)
+    ax_f2.hist(wave_periods_min, bins='auto', density=True, alpha=0.5, edgecolor='black',
+               label='Данные')
+    ax_f2.plot(x_p, norm.pdf(x_p, mu_p, std_p), 'r-', lw=2,
+               label=f'Норм. (μ={mu_p:.2f}, σ={std_p:.2f})')
+    ax_f2.plot(x_p, rayleigh.pdf(x_p, ray_loc_p, ray_scale_p), 'g-', lw=2,
+               label=f'Рэлей (loc={ray_loc_p:.2f}, sc={ray_scale_p:.2f})')
+    ax_f2.set_xlabel("Период, мин")
+    ax_f2.set_ylabel("Плотность")
+    ax_f2.set_title("Подгонка распределений периодов")
+    ax_f2.legend(fontsize=8)
+    ax_f2.grid(True, alpha=0.3)
+    fig_fit.tight_layout()
+    plt.show()
+
+    # --- Проверка гипотез ---
+    print(f"\n{'=' * 60}")
+    print("ПРОВЕРКА ГИПОТЕЗ О РАСПРЕДЕЛЕНИИ")
+    print(f"{'=' * 60}")
+
+    print("\nВысоты:")
+    ks_stat, ks_p = kstest(wave_heights, 'norm', args=(mu_h, std_h))
+    print(f"  KS (нормальное): D={ks_stat:.4f}, p={ks_p:.4f}"
+          f"  {'не отвергается' if ks_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+    ks_stat, ks_p = kstest(wave_heights, 'rayleigh', args=(ray_loc_h, ray_scale_h))
+    print(f"  KS (Рэлей):      D={ks_stat:.4f}, p={ks_p:.4f}"
+          f"  {'не отвергается' if ks_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+    if 3 <= len(wave_heights) <= 5000:
+        sw_stat, sw_p = shapiro(wave_heights)
+        print(f"  Шапиро–Уилк:     W={sw_stat:.4f}, p={sw_p:.4f}"
+              f"  {'не отвергается' if sw_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+
+    print("\nПериоды:")
+    ks_stat, ks_p = kstest(wave_periods_min, 'norm', args=(mu_p, std_p))
+    print(f"  KS (нормальное): D={ks_stat:.4f}, p={ks_p:.4f}"
+          f"  {'не отвергается' if ks_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+    ks_stat, ks_p = kstest(wave_periods_min, 'rayleigh', args=(ray_loc_p, ray_scale_p))
+    print(f"  KS (Рэлей):      D={ks_stat:.4f}, p={ks_p:.4f}"
+          f"  {'не отвергается' if ks_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+    if 3 <= len(wave_periods_min) <= 5000:
+        sw_stat, sw_p = shapiro(wave_periods_min)
+        print(f"  Шапиро–Уилк:     W={sw_stat:.4f}, p={sw_p:.4f}"
+              f"  {'не отвергается' if sw_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+
+    # =========================================================
+    # 14. СПЕКТРЫ ДО И ПОСЛЕ ЦУГА
+    # =========================================================
+    wave_center_idx = np.array(wave_center_idx)
+
+    diffs = np.diff(wave_center_idx)
+    cluster_breaks = np.where(diffs > int(10 * 60 / dt))[0]
+
+    cluster_starts = [0] + (cluster_breaks + 1).tolist()
+    cluster_ends = cluster_breaks.tolist() + [len(wave_center_idx) - 1]
+
+    cluster_lengths = [cluster_ends[i] - cluster_starts[i] + 1
+                       for i in range(len(cluster_starts))]
+    best_cluster = np.argmax(cluster_lengths)
+
+    ci_start = wave_center_idx[cluster_starts[best_cluster]]
+    ci_end = wave_center_idx[cluster_ends[best_cluster]]
+
+    print(f"\nНаиболее плотный цуг: {cluster_lengths[best_cluster]} волн, "
+          f"индексы {ci_start}–{ci_end} "
+          f"({t_segment[ci_start].strftime('%H:%M')}–{t_segment[ci_end].strftime('%H:%M')})")
+
+    window_pts = int(2 * 3600 / dt)
+
+    before_end = ci_start
+    before_start = max(0, before_end - window_pts)
+    after_start = ci_end
+    after_end = min(len(signal_best), after_start + window_pts)
+
+    seg_before = signal_best[before_start:before_end]
+    seg_after = signal_best[after_start:after_end]
+
+    print(f"Участок ДО цуга:  {len(seg_before)} точек "
+          f"({t_segment[before_start].strftime('%H:%M')}–{t_segment[before_end].strftime('%H:%M')})")
+    print(f"Участок ПОСЛЕ цуга: {len(seg_after)} точек "
+          f"({t_segment[after_start].strftime('%H:%M')}–"
+          f"{t_segment[min(after_end-1, len(t_segment)-1)].strftime('%H:%M')})")
+
+    # --- График сигнала с выделением ---
+    fig_tseg, ax_tseg = plt.subplots(figsize=(14, 4))
+    ax_tseg.plot(t_segment, signal_best, lw=0.6, color="gray", label="Сигнал (detrend)")
+    ax_tseg.plot(t_segment, filtered, lw=0.8, color="teal", label="Фильтр 3–5 мин")
+    ax_tseg.axvspan(t_segment[before_start], t_segment[before_end],
+                    color="blue", alpha=0.15, label="До цуга")
+    ax_tseg.axvspan(t_segment[ci_start], t_segment[ci_end],
+                    color="red", alpha=0.15, label="Цуг")
+    if after_end <= len(t_segment):
+        ax_tseg.axvspan(t_segment[after_start], t_segment[min(after_end - 1, len(t_segment) - 1)],
+                        color="green", alpha=0.15, label="После цуга")
+    ax_tseg.set_ylabel("Отклонение глубины, м")
+    ax_tseg.set_xlabel("Время")
+    ax_tseg.set_title(f"Изотерма {best_iso}°C: цуг и участки до/после")
+    ax_tseg.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+    ax_tseg.grid(True, alpha=0.3)
+    ax_tseg.legend(fontsize=8)
+    fig_tseg.tight_layout()
+    plt.show()
+
+    # --- Спектры до и после ---
+    def compute_psd_slope(sig, dt_s, label_txt):
+        n = len(sig)
+        if n < 64:
+            return None, None, None, None, None
+        sig_d = detrend(sig, type='linear')
+        f_hz = np.fft.rfftfreq(n, d=dt_s)
+        f_h = f_hz * 3600.0
+        fa = 1.0 / dt_s
+        X = np.fft.rfft(sig_d)
+        Pxx = ((1.0 / (n * fa)) * (np.abs(X) ** 2)) / 3600.0
+        mask = (f_h > 0) & (Pxx > 0) & np.isfinite(Pxx)
+        if np.sum(mask) < 2:
+            return f_h, Pxx, np.nan, np.nan, mask
+        log_f = np.log10(f_h[mask])
+        log_P = np.log10(Pxx[mask])
+        slope, intercept = np.polyfit(log_f, log_P, 1)
+        return f_h, Pxx, slope, intercept, mask
+
+    r_before = compute_psd_slope(seg_before, dt, "До")
+    r_after = compute_psd_slope(seg_after, dt, "После")
+
+    if r_before[0] is not None and r_after[0] is not None:
+        f_b, Pxx_b, slope_b, int_b, mask_b = r_before
+        f_a, Pxx_a, slope_a, int_a, mask_a = r_after
+
+        print(f"\nНаклон спектра ДО цуга:    {slope_b:.2f}")
+        print(f"Наклон спектра ПОСЛЕ цуга: {slope_a:.2f}")
+
+        fig_ba, (ax_ba1, ax_ba2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        mpsd_b = (f_b > 0) & (Pxx_b > 0) & np.isfinite(Pxx_b)
+        mpsd_a = (f_a > 0) & (Pxx_a > 0) & np.isfinite(Pxx_a)
+
+        if np.any(mpsd_b):
+            ax_ba1.loglog(f_b[mpsd_b], Pxx_b[mpsd_b], "b", lw=1, label="PSD до цуга")
+        if np.isfinite(slope_b):
+            f_fit = f_b[mask_b]
+            ax_ba1.loglog(f_fit, 10 ** (int_b + slope_b * np.log10(f_fit)),
+                          "r--", lw=1.5, label=f"Наклон = {slope_b:.2f}")
+        ax_ba1.set_xlabel("Частота, 1/час")
+        ax_ba1.set_ylabel("PSD, м²·час")
+        ax_ba1.set_title(f"ДО цуга ({len(seg_before)} точек)")
+        ax_ba1.grid(True, which="both", alpha=0.3)
+        ax_ba1.legend(fontsize=9)
+
+        if np.any(mpsd_a):
+            ax_ba2.loglog(f_a[mpsd_a], Pxx_a[mpsd_a], "darkgreen", lw=1, label="PSD после цуга")
+        if np.isfinite(slope_a):
+            f_fit = f_a[mask_a]
+            ax_ba2.loglog(f_fit, 10 ** (int_a + slope_a * np.log10(f_fit)),
+                          "r--", lw=1.5, label=f"Наклон = {slope_a:.2f}")
+        ax_ba2.set_xlabel("Частота, 1/час")
+        ax_ba2.set_ylabel("PSD, м²·час")
+        ax_ba2.set_title(f"ПОСЛЕ цуга ({len(seg_after)} точек)")
+        ax_ba2.grid(True, which="both", alpha=0.3)
+        ax_ba2.legend(fontsize=9)
+
+        fig_ba.suptitle(f"Спектры до и после цуга (изотерма {best_iso}°C)", fontsize=13)
+        fig_ba.tight_layout()
+        plt.show()
+    else:
+        print("Недостаточно данных для построения спектров до/после цуга.")
