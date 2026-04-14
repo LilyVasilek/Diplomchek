@@ -32,8 +32,12 @@ def plot_scheme(depths_arr, outpath=None, show=True):
     ax.hlines(max_depth, -0.5, 0.5, color="saddlebrown", lw=3)
     ax.text(0.6, max_depth, "Дно (прибл.)", va="center", ha="left", color="saddlebrown")
     ax.scatter(np.zeros_like(md), md, s=100, c="red", zorder=5)
+    i_bottom = int(np.nanargmax(md))
     for i, d in enumerate(md):
-        ax.text(0.1, d, f"{i+1}\n{d:.1f} м", va="center", ha="left", fontsize=9)
+        lbl = f"{i+1}\n{d:.1f} м"
+        if i == i_bottom:
+            lbl += "\n(на дне)"
+        ax.text(0.1, d, lbl, va="center", ha="left", fontsize=9)
     ax.set_ylim(max_depth + 0.5, -0.5)
     ax.set_xlim(-1, 1)
     ax.set_xticks([])
