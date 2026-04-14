@@ -137,14 +137,15 @@ print(f"  Нижний слой:  {T_min:.1f} – {T_min + T_third:.1f} °C")
 print(f"  Средний слой: {T_min + T_third:.1f} – {T_min + 2*T_third:.1f} °C")
 print(f"  Верхний слой: {T_min + 2*T_third:.1f} – {T_max:.1f} °C")
 
-iso_upper = float(input("\nВведите изотерму верхнего слоя (°C): "))
-iso_middle = float(input("Введите изотерму среднего слоя (°C): "))
-iso_lower = float(input("Введите изотерму нижнего слоя (°C): "))
+iso_input = []
+for i in range(3):
+    iso_input.append(float(input(f"\nВведите изотерму {i+1} (°C): ")))
 
-iso_values = [iso_upper, iso_middle, iso_lower]
+iso_sorted = sorted(iso_input, reverse=True)
+iso_values = iso_sorted
 iso_labels = ["верхний слой", "средний слой", "нижний слой"]
 
-print(f"\nВыбранные изотермы:")
+print(f"\nИзотермы (отсортированы по слоям):")
 for tv, lb in zip(iso_values, iso_labels):
     print(f"  {tv}°C  ({lb})")
 
@@ -163,14 +164,18 @@ fig7, ax7 = plt.subplots(figsize=(12, 6))
 cf = ax7.contourf(TT, DD, temps_30s.T, 20, cmap="viridis")
 ax7.invert_yaxis()
 plt.colorbar(cf, ax=ax7, label="Температура, °C")
+label_positions = [0.25, 0.50, 0.75]
 for idx, T_iso in enumerate(iso_values):
     z_iso = iso_depths[T_iso]
     ax7.plot(time_30s, z_iso, color="white", lw=0.8, label=f"{T_iso}°C ({iso_labels[idx]})")
     valid_idx = np.where(~np.isnan(z_iso))[0]
     if len(valid_idx) > 0:
-        mid = valid_idx[len(valid_idx) // 2]
-        ax7.text(time_30s[mid], z_iso[mid], f" {T_iso}°C",
-                 color="white", fontsize=10, fontweight="bold", va="bottom")
+        pos = int(len(valid_idx) * label_positions[idx])
+        pos = min(pos, len(valid_idx) - 1)
+        ti = valid_idx[pos]
+        ax7.annotate(f" {T_iso}°C", xy=(time_30s[ti], z_iso[ti]),
+                     color="white", fontsize=9, fontweight="bold", va="bottom",
+                     bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.5, ec="none"))
 ax7.set_ylabel("Глубина, м")
 ax7.set_xlabel("Дата")
 ax7.set_title("Временная изменчивость температуры с изотермами")
@@ -250,6 +255,10 @@ C_M = 204.0
 fig_sp, (ax_amp, ax_psd) = plt.subplots(2, 1, figsize=(12, 12), sharex=True)
 line_colors = ["m", "teal", "darkorange"]
 
+print(f"\nМодель Гарретта–Манка: S(f,z) = C_M·f_in·√(f²−f_in²) / (N(z)·f³)")
+print(f"  Модель определена в диапазоне f_in < f < N(z)")
+print(f"  f_in (инерционная частота) = {fin:.4f} ч⁻¹")
+
 for idx, T_iso in enumerate(iso_values):
     z_iso = iso_depths[T_iso]
     z_segment = z_iso[c_start:c_end]
@@ -276,6 +285,8 @@ for idx, T_iso in enumerate(iso_values):
     mg = (f_psd > fin) & (f_psd < N_iso)
     S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
 
+    print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.4f} ч⁻¹")
+
     col = line_colors[idx]
     lbl = f"{T_iso}°C ({iso_labels[idx]})"
 
@@ -289,11 +300,11 @@ for idx, T_iso in enumerate(iso_values):
     if np.any(mpsd):
         ax_psd.loglog(f_psd[mpsd], Pxx[mpsd], color=col, lw=1, label=f"PSD {lbl}")
 
-    # --- Модель Г–М (для каждой изотермы — своя кривая, т.к. N(z) разное) ---
+    # --- Модель Г–М (для каждой изотермы — своя, т.к. N(z) на разных глубинах) ---
     mgp = (f_psd > 0) & np.isfinite(S_GM) & (S_GM > 0)
     if np.any(mgp):
         ax_psd.loglog(f_psd[mgp], S_GM[mgp], color=col, ls="-.", lw=2,
-                      alpha=0.7, label=f"Г–М {T_iso}°C")
+                      alpha=0.7, label=f"Г–М {T_iso}°C (N={N_iso:.2f})")
 
 # --- Пунктир частоты Вяйсяля–Брента ---
 N_mean = (np.nanmean(N_profile) / (2 * np.pi)) * 3600
