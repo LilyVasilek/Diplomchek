@@ -401,51 +401,74 @@ fig_bp.tight_layout()
 plt.show()
 
 # =========================================================
-# 13. ВЫДЕЛЕНИЕ ЦУГОВ КОРОТКОПЕРИОДНЫХ ВОЛН (3–5 МИН, h ≥ 0.5 М)
+# 13. ВЫДЕЛЕНИЕ ЦУГОВ КОРОТКОПЕРИОДНЫХ ВОЛН
+#     Подход: полосовой фильтр → огибающая (Гильберт) →
+#     цуги = участки где огибающая ≥ 0.5 м →
+#     внутри цугов считаем отдельные волны по пикам
 # =========================================================
+from scipy.signal import hilbert as hilbert_transform
+
 signal_best = detrend(z_segment, type='linear')
 
 fs_hz = 1.0 / dt
-low_period_min = 3.0
-high_period_min = 5.0
-low_freq = 1.0 / (high_period_min * 60)
-high_freq = 1.0 / (low_period_min * 60)
 nyq = fs_hz / 2.0
 
+low_freq = 1.0 / (10 * 60)
+high_freq = 1.0 / (1.5 * 60)
 b_bp, a_bp = butter(3, [low_freq / nyq, high_freq / nyq], btype='band')
 filtered = filtfilt(b_bp, a_bp, signal_best)
 
-peaks_up, _ = find_peaks(filtered, distance=int(low_period_min * 60 / dt * 0.8))
-peaks_dn, _ = find_peaks(-filtered, distance=int(low_period_min * 60 / dt * 0.8))
+envelope = np.abs(hilbert_transform(filtered))
 
-all_extrema = np.sort(np.concatenate([peaks_up, peaks_dn]))
+amp_threshold = 0.5
+above = envelope >= amp_threshold
+padded = np.concatenate(([False], above, [False]))
+d_pad = np.diff(padded.astype(int))
+train_starts = np.where(d_pad == 1)[0]
+train_ends = np.where(d_pad == -1)[0]
+
+min_train_pts = int(2 * 60 / dt)
+trains = []
+for s, e in zip(train_starts, train_ends):
+    if (e - s) >= min_train_pts:
+        trains.append((s, e))
+
+print(f"\n{'=' * 60}")
+print(f"ЦУГИ КОРОТКОПЕРИОДНЫХ ВОЛН (огибающая ≥ {amp_threshold} м)")
+print(f"{'=' * 60}")
+print(f"Обнаружено цугов: {len(trains)}")
+
+if len(trains) > 0:
+    for ti, (ts, te) in enumerate(trains):
+        dur_min = (te - ts) * dt / 60.0
+        amp_max = np.max(envelope[ts:te])
+        print(f"  Цуг {ti+1}: {t_segment[ts].strftime('%H:%M')}–{t_segment[te-1].strftime('%H:%M')}, "
+              f"длит. {dur_min:.1f} мин, макс. амплитуда {amp_max:.2f} м")
 
 wave_heights = []
 wave_periods_s = []
-wave_center_idx = []
+wave_train_id = []
 
-for i in range(len(all_extrema) - 1):
-    i1, i2 = all_extrema[i], all_extrema[i + 1]
-    h = abs(filtered[i1] - filtered[i2])
-    period_s = (i2 - i1) * dt
-    period_min = period_s / 60.0
-    if low_period_min <= period_min <= high_period_min and h >= 0.5:
-        wave_heights.append(h)
-        wave_periods_s.append(period_s)
-        wave_center_idx.append((i1 + i2) // 2)
+for ti, (ts, te) in enumerate(trains):
+    seg_filt = filtered[ts:te]
+    pks, _ = find_peaks(seg_filt)
+    trs, _ = find_peaks(-seg_filt)
+    extrema = np.sort(np.concatenate([pks, trs]))
+    for j in range(len(extrema) - 1):
+        i1, i2 = extrema[j], extrema[j + 1]
+        h = abs(seg_filt[i1] - seg_filt[i2])
+        period_s = (i2 - i1) * dt
+        if h >= 0.25:
+            wave_heights.append(h)
+            wave_periods_s.append(period_s)
+            wave_train_id.append(ti)
 
 wave_heights = np.array(wave_heights)
 wave_periods_min = np.array(wave_periods_s) / 60.0
 
-print(f"\n{'=' * 60}")
-print(f"КОРОТКОПЕРИОДНЫЕ ВОЛНЫ (3–5 мин, h ≥ 0.5 м)")
-print(f"{'=' * 60}")
-print(f"Обнаружено волн: {len(wave_heights)}")
+print(f"\nВолн внутри цугов (h ≥ 0.25 м): {len(wave_heights)}")
 
-if len(wave_heights) == 0:
-    print("Волн не обнаружено. Пропуск статистики.")
-else:
-    # --- Статистика ---
+if len(wave_heights) >= 3:
     print(f"\nВысоты волн (м):")
     print(f"  среднее   = {np.mean(wave_heights):.3f}")
     print(f"  медиана   = {np.median(wave_heights):.3f}")
@@ -474,7 +497,7 @@ else:
     ax_hp.set_ylabel("Плотность вероятности")
     ax_hp.set_title(f"Распределение периодов (N={len(wave_periods_min)})")
     ax_hp.grid(True, alpha=0.3)
-    fig_hist.suptitle(f"Короткопериодные волны изотермы {best_iso}°C (3–5 мин, h ≥ 0.5 м)")
+    fig_hist.suptitle(f"Волны внутри цугов, изотерма {best_iso}°C")
     fig_hist.tight_layout()
     plt.show()
 
@@ -541,28 +564,21 @@ else:
         sw_stat, sw_p = shapiro(wave_periods_min)
         print(f"  Шапиро–Уилк:     W={sw_stat:.4f}, p={sw_p:.4f}"
               f"  {'не отвергается' if sw_p > 0.05 else 'ОТВЕРГАЕТСЯ'} (α=0.05)")
+else:
+    print("Недостаточно волн для статистики.")
 
-    # =========================================================
-    # 14. СПЕКТРЫ ДО И ПОСЛЕ ЦУГА
-    # =========================================================
-    wave_center_idx = np.array(wave_center_idx)
+# =========================================================
+# 14. СПЕКТРЫ ДО И ПОСЛЕ НАИБОЛЕЕ МОЩНОГО ЦУГА
+# =========================================================
+if len(trains) > 0:
+    train_amps = [np.max(envelope[s:e]) for s, e in trains]
+    best_train_idx = np.argmax(train_amps)
+    ci_start, ci_end = trains[best_train_idx]
+    ci_dur_min = (ci_end - ci_start) * dt / 60.0
 
-    diffs = np.diff(wave_center_idx)
-    cluster_breaks = np.where(diffs > int(10 * 60 / dt))[0]
-
-    cluster_starts = [0] + (cluster_breaks + 1).tolist()
-    cluster_ends = cluster_breaks.tolist() + [len(wave_center_idx) - 1]
-
-    cluster_lengths = [cluster_ends[i] - cluster_starts[i] + 1
-                       for i in range(len(cluster_starts))]
-    best_cluster = np.argmax(cluster_lengths)
-
-    ci_start = wave_center_idx[cluster_starts[best_cluster]]
-    ci_end = wave_center_idx[cluster_ends[best_cluster]]
-
-    print(f"\nНаиболее плотный цуг: {cluster_lengths[best_cluster]} волн, "
-          f"индексы {ci_start}–{ci_end} "
-          f"({t_segment[ci_start].strftime('%H:%M')}–{t_segment[ci_end].strftime('%H:%M')})")
+    print(f"\nСамый мощный цуг №{best_train_idx+1}: "
+          f"{t_segment[ci_start].strftime('%H:%M')}–{t_segment[ci_end-1].strftime('%H:%M')}, "
+          f"длит. {ci_dur_min:.1f} мин")
 
     window_pts = int(2 * 3600 / dt)
 
@@ -574,34 +590,41 @@ else:
     seg_before = signal_best[before_start:before_end]
     seg_after = signal_best[after_start:after_end]
 
-    print(f"Участок ДО цуга:  {len(seg_before)} точек "
+    print(f"Участок ДО цуга:    {len(seg_before)} точек "
           f"({t_segment[before_start].strftime('%H:%M')}–{t_segment[before_end].strftime('%H:%M')})")
     print(f"Участок ПОСЛЕ цуга: {len(seg_after)} точек "
           f"({t_segment[after_start].strftime('%H:%M')}–"
           f"{t_segment[min(after_end-1, len(t_segment)-1)].strftime('%H:%M')})")
 
-    # --- График сигнала с выделением ---
-    fig_tseg, ax_tseg = plt.subplots(figsize=(14, 4))
-    ax_tseg.plot(t_segment, signal_best, lw=0.6, color="gray", label="Сигнал (detrend)")
-    ax_tseg.plot(t_segment, filtered, lw=0.8, color="teal", label="Фильтр 3–5 мин")
-    ax_tseg.axvspan(t_segment[before_start], t_segment[before_end],
-                    color="blue", alpha=0.15, label="До цуга")
-    ax_tseg.axvspan(t_segment[ci_start], t_segment[ci_end],
-                    color="red", alpha=0.15, label="Цуг")
-    if after_end <= len(t_segment):
-        ax_tseg.axvspan(t_segment[after_start], t_segment[min(after_end - 1, len(t_segment) - 1)],
-                        color="green", alpha=0.15, label="После цуга")
-    ax_tseg.set_ylabel("Отклонение глубины, м")
-    ax_tseg.set_xlabel("Время")
-    ax_tseg.set_title(f"Изотерма {best_iso}°C: цуг и участки до/после")
-    ax_tseg.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
-    ax_tseg.grid(True, alpha=0.3)
-    ax_tseg.legend(fontsize=8)
+    # --- График: сигнал + огибающая + цуги ---
+    fig_tseg, (ax_sig, ax_env) = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+    ax_sig.plot(t_segment, signal_best, lw=0.5, color="gray", label="Сигнал (detrend)")
+    ax_sig.plot(t_segment, filtered, lw=0.7, color="teal", label="Фильтр 1.5–10 мин")
+    ax_sig.set_ylabel("Отклонение глубины, м")
+    ax_sig.set_title(f"Изотерма {best_iso}°C")
+    ax_sig.grid(True, alpha=0.3)
+    ax_sig.legend(fontsize=8)
+
+    ax_env.plot(t_segment, envelope, lw=0.8, color="darkblue", label="Огибающая (Гильберт)")
+    ax_env.axhline(amp_threshold, color="red", ls="--", lw=1,
+                   label=f"Порог = {amp_threshold} м")
+    for ti, (ts, te) in enumerate(trains):
+        lbl = "Цуги" if ti == 0 else None
+        ax_env.axvspan(t_segment[ts], t_segment[te - 1], color="red", alpha=0.15, label=lbl)
+    ax_env.axvspan(t_segment[before_start], t_segment[before_end],
+                   color="blue", alpha=0.12, label="До цуга")
+    ax_env.axvspan(t_segment[after_start], t_segment[min(after_end - 1, len(t_segment) - 1)],
+                   color="green", alpha=0.12, label="После цуга")
+    ax_env.set_ylabel("Амплитуда, м")
+    ax_env.set_xlabel("Время")
+    ax_env.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
+    ax_env.grid(True, alpha=0.3)
+    ax_env.legend(fontsize=8)
     fig_tseg.tight_layout()
     plt.show()
 
     # --- Спектры до и после ---
-    def compute_psd_slope(sig, dt_s, label_txt):
+    def compute_psd_slope(sig, dt_s):
         n = len(sig)
         if n < 64:
             return None, None, None, None, None
@@ -619,8 +642,8 @@ else:
         slope, intercept = np.polyfit(log_f, log_P, 1)
         return f_h, Pxx, slope, intercept, mask
 
-    r_before = compute_psd_slope(seg_before, dt, "До")
-    r_after = compute_psd_slope(seg_after, dt, "После")
+    r_before = compute_psd_slope(seg_before, dt)
+    r_after = compute_psd_slope(seg_after, dt)
 
     if r_before[0] is not None and r_after[0] is not None:
         f_b, Pxx_b, slope_b, int_b, mask_b = r_before
@@ -663,3 +686,5 @@ else:
         plt.show()
     else:
         print("Недостаточно данных для построения спектров до/после цуга.")
+else:
+    print("Цугов не обнаружено — спектры до/после не строятся.")
