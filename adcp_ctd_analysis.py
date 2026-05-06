@@ -284,19 +284,39 @@ SA  = gsw.SA_from_SP(ctd['Sal'].to_numpy(dtype=float), p_dbar, lon, lat)
 CT  = gsw.CT_from_t(SA, ctd['Temp'].to_numpy(dtype=float), p_dbar)
 rho = gsw.rho(SA, CT, p_dbar)
 
+# Усредняем по уникальным глубинам
 rho_df = (pd.DataFrame({'d': depth_ctd, 'rho': rho})
             .dropna().groupby('d', as_index=False).mean().sort_values('d'))
 d_prof   = rho_df['d'].to_numpy(dtype=float)
 rho_prof = rho_df['rho'].to_numpy(dtype=float)
+
+# --- Диагностика входных данных CTD ---
+print("=== Диагностика CTD ===")
+print(f"  Глубина:    {d_prof.min():.2f} – {d_prof.max():.2f} м  ({len(d_prof)} точек)")
+print(f"  Шаг по глубине (медиана): {np.median(np.diff(d_prof)):.4f} м")
+print(f"  Температура: {ctd['Temp'].min():.2f} – {ctd['Temp'].max():.2f} °C")
+print(f"  Солёность:   {ctd['Sal'].min():.2f} – {ctd['Sal'].max():.2f} PSU")
+print(f"  Плотность:   {rho_prof.min():.3f} – {rho_prof.max():.3f} кг/м³")
+
+# Сглаживание профиля плотности перед дифференцированием:
+# CTD-зонды дают шаг ~0.01–0.1 м, шум усиливается при дифференцировании.
+# Усредняем на равномерной сетке с шагом 0.5 м.
+dz_smooth = 0.5   # м
+d_uniform = np.arange(d_prof.min(), d_prof.max() + dz_smooth, dz_smooth)
+rho_smooth = np.interp(d_uniform, d_prof, rho_prof)
+
 # z = глубина, положительна вниз → при устойчивой стратификации dρ/dz > 0
 # Формула: N(z) = sqrt( g/ρ₀(z) · dρ/dz )
-drho_dz = np.gradient(rho_prof, d_prof)
-N2  = g / np.where(rho_prof > 0, rho_prof, np.nan) * drho_dz
+drho_dz = np.gradient(rho_smooth, d_uniform)
+N2  = g / np.where(rho_smooth > 0, rho_smooth, np.nan) * drho_dz
 N   = np.sqrt(np.clip(N2, 0, None))
 N_cph = N * 3600.0 / (2.0 * np.pi)
 
+print(f"  N_max = {N.max():.4f} рад/с  ({N_cph.max():.1f} цикл/час)")
+print(f"  (физически разумно для Чёрного моря: ~0.01–0.1 рад/с, ~10–70 цикл/час)")
+
 fig, ax = plt.subplots(figsize=(5, 7))
-ax.plot(N_cph, d_prof, linewidth=1.5)
+ax.plot(N_cph, d_uniform, linewidth=1.5)
 ax.invert_yaxis()
 ax.grid(True)
 ax.set_xlabel('Частота Вяйсяля–Брента N, цикл/час')
