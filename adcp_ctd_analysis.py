@@ -64,12 +64,13 @@ def stats_table(Ve_col, Vn_col, label, dt_minutes=1.0):
 # =========================================================
 # 2. ПУТИ К ФАЙЛАМ
 # =========================================================
-base_path = r"C:\Документы\ДИПЛОМ\Химченко_данные\adcp_ctd"
+# Папка с данными: рядом со скриптом (или укажите абсолютный путь)
+base_path = os.path.dirname(os.path.abspath(__file__))
 
 adcp_files = [
-    os.path.join(base_path, "230610_0000-20_2359.txt"),
-    os.path.join(base_path, "230601_0000-10_2359.txt"),
-    os.path.join(base_path, "230621_0000-30_2359.txt")
+    os.path.join(base_path, "ADCP_1.txt"),
+    os.path.join(base_path, "ADCP_2.txt"),
+    os.path.join(base_path, "ADCP_3.txt"),
 ]
 
 ctd_file = os.path.join(base_path, "CTD.txt")
