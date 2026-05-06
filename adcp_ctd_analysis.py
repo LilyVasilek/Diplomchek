@@ -339,10 +339,16 @@ N   = np.sqrt(np.clip(N2, 0, None))
 N_cph = N * 3600.0 / (2.0 * np.pi)
 print(f"  N_max = {N.max():.4f} рад/с  ({N_cph.max():.1f} цикл/час)")
 
+N_max_val = float(N_cph.max())
+N_max_depth = float(d_uniform[np.argmax(N_cph)])
+
 fig, ax = plt.subplots(figsize=(5, 7))
-ax.plot(N_cph, d_uniform, linewidth=1.5)
+ax.plot(N_cph, d_uniform, linewidth=1.5, label='N(z)')
+ax.axvline(N_max_val, color='red', linestyle='--', linewidth=1.0,
+           label=f'$N_{{max}}$ = {N_max_val:.1f} цикл/час\n(глубина {N_max_depth:.1f} м)')
 ax.invert_yaxis()
 ax.grid(True)
+ax.legend(fontsize=9)
 ax.set_xlabel('Частота Вяйсяля–Брента N, цикл/час')
 ax.set_ylabel('Глубина, м')
 ax.set_title('Профиль частоты Вяйсяля–Брента N(z)')
@@ -385,7 +391,7 @@ adcp_30_mean['direction'] = (np.degrees(np.arctan2(adcp_30_mean['U'], adcp_30_me
 adcp_30_mean['Depth']     = np.nan
 
 depths_avail = np.sort(adcp_30['Depth'].dropna().unique())
-horizons = [nearest_depth(depths_avail, h) for h in pick_horizons(depths_avail, n=4)]
+horizons = [nearest_depth(depths_avail, h) for h in pick_horizons(depths_avail, n=3)]
 horizons = list(dict.fromkeys([h for h in horizons if h is not None]))
 
 # =========================================================
