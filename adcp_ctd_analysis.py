@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 import gsw
-from scipy.signal import welch
 from scipy.ndimage import gaussian_filter1d
 
 
@@ -501,11 +500,32 @@ plt.savefig('fig_07_rose_direction.png', dpi=150)
 plt.close()
 
 # =========================================================
-# 10. СПЕКТР МОЩНОСТИ (WELCH): U и V
+# 10. СПЕКТР МОЩНОСТИ (периодограмм-метод): U и V
 # =========================================================
+# Формула: W(f_k) = (1 / (N * f_a)) * |X_k|^2
+# где X_k = DFT[x(n)], N — число отсчётов, f_a — частота дискретизации.
 # Спектральный анализ проводится на исходных (не усреднённых) данных.
 # Дискретность dt_sec определена выше.
-nperseg_variants = {'256 (узкое)': 256, '512': 512, '1024': 1024, '2048 (широкое)': 2048}
+
+def periodogram(x, fa):
+    """
+    Односторонний периодограмм-спектр мощности.
+    W(f_k) = (1 / (N * fa)) * |DFT[x]_k|^2
+    Возвращает (f, Pxx): частоты (Гц) и СПМ ((ед.)²/Гц).
+    """
+    x = np.asarray(x, dtype=float)
+    x = x - np.mean(x)          # вычитаем среднее (тренд по постоянной составляющей)
+    N = len(x)
+    Xk = np.fft.rfft(x)         # DFT: суммирование x(k)*exp(-j*2π*k*n/N)
+    Pxx = (1.0 / (N * fa)) * np.abs(Xk) ** 2
+    # Двойной вес для двусторонних частот (кроме 0 и Найквиста)
+    if N % 2 == 0:
+        Pxx[1:-1] *= 2
+    else:
+        Pxx[1:] *= 2
+    f = np.fft.rfftfreq(N, d=1.0 / fa)   # частоты, Гц
+    return f, Pxx
+
 
 for comp, col, fname_base in [('U (зональная)', 'U', 'U'), ('V (меридиональная)', 'V', 'V')]:
     fig, axes_s = plt.subplots(1, len(horizons), figsize=(4 * len(horizons), 5), sharey=False)
@@ -514,27 +534,23 @@ for comp, col, fname_base in [('U (зональная)', 'U', 'U'), ('V (мер�
     for ci, d in enumerate(horizons):
         sub = adcp[np.isclose(adcp['Depth'], d)].sort_values('datetime')
         ts  = sub[col].dropna().values
-        ts  -= np.mean(ts)
         ax  = axes_s[ci]
-        for lbl, nperseg in nperseg_variants.items():
-            n = min(nperseg, len(ts) // 2)
-            if n < 32:
-                continue
-            f_w, Pxx = welch(ts, fs=fs, window='hann', nperseg=n,
-                             noverlap=n // 2, detrend='linear')
-            mask = f_w > 0
-            T_min = 1.0 / f_w[mask] / 60.0
-            ax.loglog(T_min, Pxx[mask], lw=1.0, label=lbl)
+        if len(ts) < 8:
+            ax.set_title(f'{d:.1f} м (мало данных)')
+            continue
+        f_pg, Pxx = periodogram(ts, fs)
+        mask = f_pg > 0
+        T_min = 1.0 / f_pg[mask] / 60.0
+        ax.loglog(T_min, Pxx[mask], lw=0.7, color='steelblue')
         ax.invert_xaxis()
         ax.grid(True, which='both', lw=0.4)
         ax.set_xlabel('Период, мин')
         if ci == 0:
-            ax.set_ylabel('СПМ, (м/с)²/Гц')
+            ax.set_ylabel('СПМ, (ед.)²/Гц')
         ax.set_title(f'{d:.1f} м')
-        ax.legend(fontsize=7)
     fig.suptitle(
         f'Спектр мощности компоненты {comp}\n'
-        f'(шаг: {dt_min:.2f} мин, окно Хэннинга, перекрытие 50%)',
+        f'W(f) = (1/N·fₐ)|X(f)|²,  шаг: {dt_min:.2f} мин,  fₐ = {fs:.4f} Гц',
         fontsize=10
     )
     plt.tight_layout()
