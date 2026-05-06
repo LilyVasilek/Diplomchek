@@ -288,7 +288,10 @@ rho_df = (pd.DataFrame({'d': depth_ctd, 'rho': rho})
             .dropna().groupby('d', as_index=False).mean().sort_values('d'))
 d_prof   = rho_df['d'].to_numpy(dtype=float)
 rho_prof = rho_df['rho'].to_numpy(dtype=float)
-N2  = -g / np.where(rho_prof > 0, rho_prof, np.nan) * np.gradient(rho_prof, d_prof)
+# z = глубина, положительна вниз → при устойчивой стратификации dρ/dz > 0
+# Формула: N(z) = sqrt( g/ρ₀(z) · dρ/dz )
+drho_dz = np.gradient(rho_prof, d_prof)
+N2  = g / np.where(rho_prof > 0, rho_prof, np.nan) * drho_dz
 N   = np.sqrt(np.clip(N2, 0, None))
 N_cph = N * 3600.0 / (2.0 * np.pi)
 
