@@ -12,9 +12,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 import gsw
-from scipy.signal import butter, filtfilt, welch
+from scipy.signal import welch
 from scipy.ndimage import gaussian_filter1d
-import pywt
 
 
 # =========================================================
@@ -543,45 +542,7 @@ for comp, col, fname_base in [('U (зональная)', 'U', 'U'), ('V (мер�
     plt.close()
 
 # =========================================================
-# 11. ВЕЙВЛЕТ-АНАЛИЗ (5–15 МИН)
-# =========================================================
-# Полосовая фильтрация для вейвлет-анализа
-if fs > 0 and (1.0 / (5 * 60)) < fs / 2:
-    low  = 1.0 / (15 * 60)
-    high = 1.0 / ( 5 * 60)
-    b, a = butter(2, [low / (fs / 2), high / (fs / 2)], btype='band')
-    ref_depth = horizons[len(horizons) // 2]
-    sub = adcp[np.isclose(adcp['Depth'], ref_depth)].sort_values('datetime')
-    u_ts = sub['U'].interpolate(limit=5).fillna(0).values
-    if len(u_ts) > 4 * len(b):
-        u_filt = filtfilt(b, a, u_ts)
-    else:
-        u_filt = u_ts
-
-    step   = max(1, int(round(60.0 / dt_sec)))
-    u_w    = u_filt[::step]
-    dt_w   = dt_sec * step
-    t_w    = sub['datetime'].iloc[::step]
-
-    periods = np.linspace(5, 15, 40)
-    scales  = periods * 60.0 / (2.0 * np.pi)
-    coeffs, _ = pywt.cwt(u_w, scales, 'morl', sampling_period=dt_w)
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-    T_wv, P_wv = np.meshgrid(mdates.date2num(t_w.to_list()), periods)
-    ax.pcolormesh(T_wv, P_wv, np.abs(coeffs), shading='nearest', cmap='jet')
-    ax.invert_yaxis()
-    fmt_time_axis(ax)
-    ax.set_xlabel('Дата / Время')
-    ax.set_ylabel('Период, мин')
-    ax.set_title(f'Вейвлет-анализ компоненты U (5–15 мин), горизонт {ref_depth:.1f} м')
-    plt.colorbar(plt.cm.ScalarMappable(cmap='jet'), ax=ax, label='Амплитуда')
-    plt.tight_layout()
-    plt.savefig('fig_09_wavelet.png', dpi=150)
-    plt.close()
-
-# =========================================================
-# 12. ПРОГРЕССИВНЫЕ ВЕКТОРНЫЕ ДИАГРАММЫ (PVD)
+# 11. ПРОГРЕССИВНЫЕ ВЕКТОРНЫЕ ДИАГРАММЫ (PVD)
 # =========================================================
 pvd_items = [(d, f'Глубина {d:.1f} м (30 мин)') for d in horizons] + \
             [(None, 'Среднее по вертикали (30 мин)')]
@@ -605,7 +566,7 @@ for k in range(len(pvd_items), len(axes_flat)):
 fig.suptitle('Прогрессивные векторные диаграммы течений\n(X = ΣU·Δt, Y = ΣV·Δt)',
              fontsize=11)
 plt.tight_layout()
-plt.savefig('fig_10_progressive_vector.png', dpi=150)
+plt.savefig('fig_09_progressive_vector.png', dpi=150)
 plt.close()
 
 # =========================================================
@@ -621,8 +582,7 @@ saved = [
     'fig_07_rose_direction.png',
     'fig_08_spectrum_U.png',
     'fig_08_spectrum_V.png',
-    'fig_09_wavelet.png',
-    'fig_10_progressive_vector.png',
+    'fig_09_progressive_vector.png',
     'adcp_statistics.csv',
 ]
 print('\nСохранены файлы:')
