@@ -277,45 +277,67 @@ ctd  = load_ctd()
 # 4. ПРОФИЛЬ ЧАСТОТЫ ВЯЙСЯЛЯ–БРЕНТА (CTD)
 # =========================================================
 lat, lon, g = 44.5, 37.98, 9.81
-ctd = ctd.sort_values('Depth(m)').dropna(subset=['Depth(m)', 'Temp', 'Sal']).reset_index(drop=True)
-depth_ctd = np.abs(ctd['Depth(m)'].to_numpy(dtype=float))
+ctd = ctd.dropna(subset=['Depth(m)', 'Temp', 'Sal']).copy()
+ctd['Depth(m)'] = np.abs(ctd['Depth(m)'].astype(float))
+
+# --- Разделяем зондирования ---
+# Зондирование = монотонно возрастающая последовательность глубин.
+# Сброс счётчика при каждом уменьшении глубины (зонд пошёл вверх = новый спуск).
+ctd = ctd.sort_index().reset_index(drop=True)
+cast_id = (ctd['Depth(m)'].diff().fillna(1) < 0).cumsum()
+ctd['cast'] = cast_id
+casts = ctd['cast'].unique()
+print(f"=== Диагностика CTD: найдено зондирований: {len(casts)} ===")
+
+# Выбираем зондирование с максимальным перепадом плотности (наибольшая стратификация)
+best_cast = None
+best_drho  = -np.inf
+for c in casts:
+    sub = ctd[ctd['cast'] == c].sort_values('Depth(m)')
+    if len(sub) < 5:
+        continue
+    d_c = sub['Depth(m)'].to_numpy(dtype=float)
+    p_c = gsw.p_from_z(-d_c, lat)
+    SA_c  = gsw.SA_from_SP(sub['Sal'].to_numpy(dtype=float), p_c, lon, lat)
+    CT_c  = gsw.CT_from_t(SA_c, sub['Temp'].to_numpy(dtype=float), p_c)
+    rho_c = gsw.rho(SA_c, CT_c, p_c)
+    drho = float(np.nanmax(rho_c) - np.nanmin(rho_c))
+    print(f"  Зондирование {c}: {len(sub)} точек, "
+          f"глубина {d_c.min():.1f}–{d_c.max():.1f} м, Δρ = {drho:.3f} кг/м³")
+    if drho > best_drho:
+        best_drho = drho
+        best_cast = c
+
+print(f"  → Используется зондирование {best_cast} (Δρ = {best_drho:.3f} кг/м³)")
+ctd_cast = ctd[ctd['cast'] == best_cast].sort_values('Depth(m)').reset_index(drop=True)
+
+depth_ctd = ctd_cast['Depth(m)'].to_numpy(dtype=float)
 p_dbar = gsw.p_from_z(-depth_ctd, lat)
-SA  = gsw.SA_from_SP(ctd['Sal'].to_numpy(dtype=float), p_dbar, lon, lat)
-CT  = gsw.CT_from_t(SA, ctd['Temp'].to_numpy(dtype=float), p_dbar)
+SA  = gsw.SA_from_SP(ctd_cast['Sal'].to_numpy(dtype=float), p_dbar, lon, lat)
+CT  = gsw.CT_from_t(SA, ctd_cast['Temp'].to_numpy(dtype=float), p_dbar)
 rho = gsw.rho(SA, CT, p_dbar)
 
-# Усредняем по уникальным глубинам
+# Усредняем дублирующиеся глубины (если есть)
 rho_df = (pd.DataFrame({'d': depth_ctd, 'rho': rho})
             .dropna().groupby('d', as_index=False).mean().sort_values('d'))
 d_prof   = rho_df['d'].to_numpy(dtype=float)
 rho_prof = rho_df['rho'].to_numpy(dtype=float)
 
-# --- Диагностика входных данных CTD ---
-print("=== Диагностика CTD ===")
-print(f"  Глубина:    {d_prof.min():.2f} – {d_prof.max():.2f} м  ({len(d_prof)} точек)")
-print(f"  Шаг по глубине (медиана): {np.median(np.diff(d_prof)):.4f} м")
-print(f"  Температура: {ctd['Temp'].min():.2f} – {ctd['Temp'].max():.2f} °C")
-print(f"  Солёность:   {ctd['Sal'].min():.2f} – {ctd['Sal'].max():.2f} PSU")
-print(f"  Плотность:   {rho_prof.min():.3f} – {rho_prof.max():.3f} кг/м³")
+print(f"  Температура: {ctd_cast['Temp'].min():.2f}–{ctd_cast['Temp'].max():.2f} °C")
+print(f"  Солёность:   {ctd_cast['Sal'].min():.2f}–{ctd_cast['Sal'].max():.2f} PSU")
+print(f"  Плотность:   {rho_prof.min():.3f}–{rho_prof.max():.3f} кг/м³")
 
-# Сглаживание профиля плотности перед дифференцированием:
-# CTD-зонды дают шаг ~0.01–0.1 м, шум при дифференцировании усиливается.
-# 1) Интерполируем на равномерную сетку с шагом 1 м
-# 2) Дополнительно сглаживаем гауссовым фильтром (σ = 1 узел)
-dz_smooth = 1.0   # м
-d_uniform = np.arange(d_prof.min(), d_prof.max() + dz_smooth, dz_smooth)
+# Сглаживание: интерполяция на равномерную сетку 0.5 м (сохраняет пик термоклина)
+dz_smooth = 0.5
+d_uniform  = np.arange(d_prof.min(), d_prof.max() + dz_smooth, dz_smooth)
 rho_smooth = np.interp(d_uniform, d_prof, rho_prof)
-rho_smooth = gaussian_filter1d(rho_smooth, sigma=1.0)
 
-# z = глубина, положительна вниз → при устойчивой стратификации dρ/dz > 0
-# Формула: N(z) = sqrt( g/ρ₀(z) · dρ/dz )
+# z = глубина, положительна вниз → N(z) = sqrt( g/ρ₀ · dρ/dz )
 drho_dz = np.gradient(rho_smooth, d_uniform)
 N2  = g / np.where(rho_smooth > 0, rho_smooth, np.nan) * drho_dz
 N   = np.sqrt(np.clip(N2, 0, None))
 N_cph = N * 3600.0 / (2.0 * np.pi)
-
 print(f"  N_max = {N.max():.4f} рад/с  ({N_cph.max():.1f} цикл/час)")
-print(f"  (физически разумно для Чёрного моря: ~0.01–0.1 рад/с, ~10–70 цикл/час)")
 
 fig, ax = plt.subplots(figsize=(5, 7))
 ax.plot(N_cph, d_uniform, linewidth=1.5)
