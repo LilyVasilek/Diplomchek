@@ -1,715 +1,521 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from scipy.signal import butter, filtfilt, welch
-from scipy.interpolate import griddata
-import pywt
 import gsw
 import os
+import glob
+import re
+from scipy.ndimage import gaussian_filter1d
+
 
 # =========================================================
-# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 1. ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ
 # =========================================================
 def julian_to_datetime(jd):
     return datetime.fromordinal(int(jd)) + timedelta(days=jd % 1) - timedelta(days=366)
 
 
-def fmt_time_axis(ax):
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m\n%H:%M'))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
+def n_u_reversals(u):
+    """Число смен знака компоненты u между соседними отсчётами (усреднёнными)."""
+    u = np.asarray(u, dtype=float)
+    if len(u) < 2:
+        return 0
+    return int(np.sum(u[:-1] * u[1:] < 0))
 
 
-def compute_speed_direction(Ve, Vn):
-    speed = np.sqrt(Ve**2 + Vn**2)
-    direction = np.degrees(np.arctan2(Ve, Vn)) % 360
-    return speed, direction
-
-
-def stats_table(Ve_col, Vn_col, label, dt_minutes=1.0):
-    """Compute statistical parameters for one depth level."""
-    u = Ve_col.dropna().values
-    v = Vn_col.dropna().values
-    speed = np.sqrt(u**2 + v**2)
-
-    u_pos_pct = 100.0 * np.sum(u > 0) / len(u) if len(u) > 0 else np.nan
-    u_neg_pct = 100.0 * np.sum(u < 0) / len(u) if len(u) > 0 else np.nan
-
-    # N_rev: number of sign changes of u component
-    signs = np.sign(u[u != 0])
-    n_rev = int(np.sum(np.diff(signs) != 0)) if len(signs) > 1 else 0
-
+def current_stats_table(u, v, speed):
+    """Статистика течений по ряду (уже с нужным усреднением)."""
+    u = np.asarray(u, dtype=float)
+    v = np.asarray(v, dtype=float)
+    speed = np.asarray(speed, dtype=float)
+    mask = np.isfinite(u) & np.isfinite(v) & np.isfinite(speed)
+    u, v, speed = u[mask], v[mask], speed[mask]
+    if len(u) == 0:
+        return {}
+    u_pos = np.sum(u > 0) / len(u) * 100.0
+    u_neg = np.sum(u < 0) / len(u) * 100.0
     return {
-        'Горизонт': label,
-        'U ср, м/с': round(float(np.mean(u)), 4),
-        'U макс, м/с': round(float(np.max(u)), 4),
-        'U мин, м/с': round(float(np.min(u)), 4),
-        '|U std|, м/с': round(float(np.std(u)), 4),
-        'V ср, м/с': round(float(np.mean(v)), 4),
-        'V макс, м/с': round(float(np.max(v)), 4),
-        'V мин, м/с': round(float(np.min(v)), 4),
-        '|V std|, м/с': round(float(np.std(v)), 4),
-        'Скор. ср, м/с': round(float(np.mean(speed)), 4),
-        'Скор. макс, м/с': round(float(np.max(speed)), 4),
-        'U pos, %': round(u_pos_pct, 1),
-        'U neg, %': round(u_neg_pct, 1),
-        'N rev': n_rev,
+        'mean_U': np.nanmean(u),
+        'mean_V': np.nanmean(v),
+        'mean_speed': np.nanmean(speed),
+        'max_speed': np.nanmax(speed),
+        'min_speed': np.nanmin(speed),
+        'std_speed': np.nanstd(speed),
+        'U_pos_pct': u_pos,
+        'U_neg_pct': u_neg,
+        'N_rev': n_u_reversals(u),
     }
+
+
+def pick_horizons(depths, n=3):
+    """Несколько характерных горизонтов: у поверхности, середина, у дна."""
+    d = np.sort(np.unique(np.asarray(depths, dtype=float)))
+    d = d[np.isfinite(d)]
+    if len(d) == 0:
+        return []
+    if len(d) <= n:
+        return list(d)
+    idx = np.linspace(0, len(d) - 1, n, dtype=int)
+    return list(np.unique(d[idx]))
+
+
+def nearest_depth(actual_depths, target):
+    """Ближайший доступный горизонт к заданной глубине."""
+    d = np.asarray(actual_depths, dtype=float)
+    if len(d) == 0:
+        return None
+    return float(d[np.argmin(np.abs(d - target))])
+
+
+def hovmoller_pcolormesh(ax, df, var, title, cbar_label, cmap='RdBu_r'):
+    """Карта «глубина — время» для скалярного поля."""
+    pt = df.pivot_table(index='Depth', columns='datetime', values=var, aggfunc='mean')
+    if pt.empty:
+        ax.set_title(title + ' (нет данных)')
+        return
+    pt = pt.sort_index().sort_index(axis=1)
+    pt = pt.ffill(axis=1).bfill(axis=1)
+    pt = pt.interpolate(axis=0, limit_direction='both')
+    pt = pt.ffill(axis=1).bfill(axis=1).ffill(axis=0).bfill(axis=0)
+    depths = np.asarray(pt.index, dtype=float)
+    times = pd.to_datetime(pt.columns)
+    Z = pt.values.astype(float)
+    # Более мелкая вертикальная фильтрация: сохраняем тонкие структуры.
+    Z = gaussian_filter1d(Z, sigma=0.45, axis=0, mode='nearest')
+    if len(depths) > 2:
+        fine_depths = np.linspace(depths.min(), depths.max(), len(depths) * 8)
+        Z_fine = np.empty((len(fine_depths), Z.shape[1]), dtype=float)
+        for j in range(Z.shape[1]):
+            Z_fine[:, j] = np.interp(fine_depths, depths, Z[:, j])
+        depths = fine_depths
+        Z = Z_fine
+    tnum = mdates.date2num(times.to_pydatetime())
+    if len(tnum) > 1:
+        dt = np.median(np.diff(tnum))
+        t_edges = np.concatenate([[tnum[0] - dt / 2], (tnum[:-1] + tnum[1:]) / 2, [tnum[-1] + dt / 2]])
+    else:
+        dt = 1.0 / 24.0
+        t_edges = np.array([tnum[0] - dt / 2, tnum[0] + dt / 2])
+    if len(depths) > 1:
+        dz = np.median(np.diff(np.sort(depths)))
+        z_edges = np.concatenate([[depths.min() - dz / 2], (depths[:-1] + depths[1:]) / 2, [depths.max() + dz / 2]])
+    else:
+        dz = 1.0
+        z_edges = np.array([depths[0] - dz / 2, depths[0] + dz / 2])
+    pcm = ax.imshow(
+        Z,
+        aspect='auto',
+        origin='upper',
+        cmap=cmap,
+        interpolation='bilinear',
+        extent=[tnum[0], tnum[-1], depths.max(), depths.min()],
+    )
+    ax.invert_yaxis()
+    ax.set_xlabel('Время')
+    ax.set_ylabel('Глубина, м')
+    ax.set_title(title)
+    plt.colorbar(pcm, ax=ax, label=cbar_label)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m %H:%M'))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=25, ha='right')
+
+
+def progressive_vector_diagram(ax, sub, title):
+    """
+    Прогрессивная векторная диаграмма: траектория смещения (интеграл U·dt, V·dt).
+    Цвет точек — порядок времени (как в классических PVD для приливных течений).
+    """
+    sub = sub.sort_values('datetime').dropna(subset=['U', 'V'])
+    if len(sub) < 2:
+        ax.text(0.5, 0.5, 'Недостаточно точек', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(title)
+        return
+    t = pd.to_datetime(sub['datetime']).values
+    u = sub['U'].to_numpy(dtype=float)
+    v = sub['V'].to_numpy(dtype=float)
+    t64 = t.astype('datetime64[ns]').astype(np.int64) / 1e9
+    dt = np.zeros(len(t64), dtype=float)
+    if len(t64) > 1:
+        dt[1:] = np.diff(t64)
+        dt[0] = float(np.median(dt[1:]))
+    else:
+        dt[0] = 1800.0
+    x = np.cumsum(u * dt)
+    y = np.cumsum(v * dt)
+    ax.plot(x, y, color='tab:blue', lw=1.0, alpha=0.9, zorder=2)
+    ax.plot(x[0], y[0], 'o', color='black', ms=5, zorder=4)
+    ax.plot(x[-1], y[-1], 'o', color='black', ms=5, zorder=4)
+    t_start = pd.to_datetime(sub['datetime'].iloc[0]).strftime('%d.%m %H:%M')
+    t_end = pd.to_datetime(sub['datetime'].iloc[-1]).strftime('%d.%m %H:%M')
+    ax.text(
+        0.02, 0.98,
+        f'Старт: {t_start}\nКонец: {t_end}',
+        transform=ax.transAxes, va='top', ha='left', fontsize=8,
+        bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='gray', alpha=0.85)
+    )
+    ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, alpha=0.4)
+    ax.set_xlabel('ΔX, м', fontsize=9, labelpad=4)
+    ax.set_ylabel('ΔY, м', fontsize=9, labelpad=4)
+    ax.set_title(title)
+    # Текстовые подписи начала/конца добавлены прямо на график.
 
 
 # =========================================================
 # 2. ПУТИ К ФАЙЛАМ
 # =========================================================
-# Папка с данными: рядом со скриптом (или укажите абсолютный путь)
-base_path = os.path.dirname(os.path.abspath(__file__))
+base_path = r"C:\Документы\ДИПЛОМ\Химченко_данные\adcp_ctd"
 
-adcp_files = [
-    os.path.join(base_path, "ADCP_1.txt"),
-    os.path.join(base_path, "ADCP_2.txt"),
-    os.path.join(base_path, "ADCP_3.txt"),
-]
+adcp_file = os.path.join(base_path, "adcp.csv")
+ctd_file = os.path.join(base_path, "ctd.csv")
 
-ctd_file = os.path.join(base_path, "CTD.txt")
 
-# =========================================================
-# 3. ЧТЕНИЕ ADCP
-# =========================================================
-adcp_list = []
+def load_adcp(path, base_dir):
+    def parse_start_datetime_from_filename(filepath):
+        name = os.path.basename(filepath)
+        m = re.search(r"(\d{6})_(\d{4})", name)
+        if not m:
+            return None
+        d6, t4 = m.groups()
+        yy = int(d6[:2])
+        mm = int(d6[2:4])
+        dd = int(d6[4:6])
+        hh = int(t4[:2])
+        mi = int(t4[2:4])
+        year = 2000 + yy
+        try:
+            return pd.Timestamp(year=year, month=mm, day=dd, hour=hh, minute=mi)
+        except ValueError:
+            return None
 
-for file in adcp_files:
-    df = pd.read_csv(file, sep='\t', encoding='cp1251')
+    adcp_frames = []
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        df["__source_file"] = path
+        adcp_frames.append(df)
+    else:
+        # Поддержка набора файлов ADCP_1/2/3.txt (таб-разделитель).
+        patterns = [
+            os.path.join(base_path, "ADCP*.txt"),
+            os.path.join(base_dir, "ADCP*.txt"),
+        ]
+        adcp_txt_files = []
+        for p in patterns:
+            adcp_txt_files.extend(glob.glob(p))
+        adcp_txt_files = sorted(set(adcp_txt_files))
+        if not adcp_txt_files:
+            raise FileNotFoundError(
+                f"Файл ADCP не найден: {path}. Также не найдены ADCP*.txt в {base_path} и {base_dir}"
+            )
+        for txt in adcp_txt_files:
+            df = pd.read_csv(txt, sep=r"\s+")
+            df["__source_file"] = txt
+            adcp_frames.append(df)
+    adcp_df = pd.concat(adcp_frames, ignore_index=True)
+    required = {"Ve", "Vn"}
+    missing = required - set(adcp_df.columns)
+    if missing:
+        raise ValueError(f"В ADCP-файле отсутствуют столбцы: {sorted(missing)}")
+    if "Depth" not in adcp_df.columns:
+        raise ValueError("В ADCP-файле отсутствует столбец 'Depth'.")
+    if "datetime" in adcp_df.columns:
+        adcp_df["datetime"] = pd.to_datetime(adcp_df["datetime"])
+    elif "iTimeDbl" in adcp_df.columns:
+        adcp_df["iTimeDbl"] = pd.to_numeric(adcp_df["iTimeDbl"], errors="coerce")
+        adcp_df["datetime"] = pd.NaT
+        for src_file, idx in adcp_df.groupby("__source_file").groups.items():
+            vals = adcp_df.loc[idx, "iTimeDbl"].to_numpy(dtype=float)
+            valid = np.isfinite(vals)
+            if not np.any(valid):
+                continue
+            start_dt = parse_start_datetime_from_filename(src_file)
+            vmin = float(np.nanmin(vals[valid]))
+            vmax = float(np.nanmax(vals[valid]))
+            if start_dt is not None and 0.0 <= vmin and vmax <= 366.0:
+                dts = start_dt + pd.to_timedelta(vals, unit="D")
+            else:
+                # По умолчанию считаем, что это Excel serial date (дни от 1899-12-30).
+                dts = pd.to_datetime(vals, unit="D", origin="1899-12-30", errors="coerce")
+            adcp_df.loc[idx, "datetime"] = dts
+    elif "JulianDay" in adcp_df.columns:
+        adcp_df["datetime"] = adcp_df["JulianDay"].apply(julian_to_datetime)
+    else:
+        raise ValueError("В ADCP-файле нет столбца времени ('datetime', 'iTimeDbl' или 'JulianDay').")
+    adcp_df["Depth"] = np.abs(adcp_df["Depth"].astype(float))
+    adcp_df = adcp_df.drop(columns=["__source_file"], errors="ignore")
+    return adcp_df.sort_values("datetime").reset_index(drop=True)
 
-    for col in ['Ve', 'Vn', 'Vz', 'Depth']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df = df.dropna(subset=['Ve', 'Vn', 'Depth'])
-    df['datetime'] = df['iTimeDbl'].apply(julian_to_datetime)
+def load_ctd(path):
+    def read_csv_with_fallbacks(csv_path):
+        encodings = ("utf-8", "utf-8-sig", "cp1251", "latin1")
+        seps = (",", ";", "\t", None)
+        last_error = None
+        for enc in encodings:
+            for sep in seps:
+                try:
+                    if sep is None:
+                        df = pd.read_csv(csv_path, encoding=enc, sep=None, engine="python")
+                    else:
+                        df = pd.read_csv(csv_path, encoding=enc, sep=sep)
+                    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+                    return df
+                except (UnicodeDecodeError, pd.errors.ParserError) as e:
+                    last_error = e
+        raise UnicodeDecodeError(
+            getattr(last_error, "encoding", "unknown"),
+            getattr(last_error, "object", b""),
+            getattr(last_error, "start", 0),
+            getattr(last_error, "end", 0),
+            f"Не удалось прочитать {csv_path} ни в одной из кодировок: {encodings}",
+        )
 
-    adcp_list.append(df)
+    def normalize_columns(ctd_df):
+        rename_map = {}
+        if "Sal(psu)" in ctd_df.columns and "Sal" not in ctd_df.columns:
+            rename_map["Sal(psu)"] = "Sal"
+        if "Temperature" in ctd_df.columns and "Temp" not in ctd_df.columns:
+            rename_map["Temperature"] = "Temp"
+        if "Depth" in ctd_df.columns and "Depth(m)" not in ctd_df.columns:
+            rename_map["Depth"] = "Depth(m)"
+        if rename_map:
+            ctd_df = ctd_df.rename(columns=rename_map)
+        return ctd_df
 
-adcp_raw = pd.concat(adcp_list).sort_values(['datetime', 'Depth']).reset_index(drop=True)
+    sources = []
+    if os.path.exists(path):
+        sources.append(path)
+    local_ctd = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CTD.txt")
+    if os.path.exists(local_ctd) and local_ctd not in sources:
+        sources.append(local_ctd)
+    if not sources:
+        raise FileNotFoundError(f"Файл CTD не найден: {path} и {local_ctd}")
 
-# =========================================================
-# 4. ФОРМИРОВАНИЕ СЕТКИ ГЛУБИНА × ВРЕМЯ
-# =========================================================
-# Уникальные глубины (бины) и временные моменты
-depth_bins = np.sort(adcp_raw['Depth'].unique())
-time_index = adcp_raw['datetime'].unique()
-time_index.sort()
+    required = {"Depth(m)", "Temp", "Sal"}
+    checked_columns = []
+    for src in sources:
+        ctd_df = normalize_columns(read_csv_with_fallbacks(src))
+        missing = required - set(ctd_df.columns)
+        if not missing:
+            return ctd_df.copy()
+        checked_columns.append((src, list(ctd_df.columns)))
+    raise ValueError(f"В CTD-файле отсутствуют столбцы: {sorted(required)}. Проверены: {checked_columns}")
 
-# Разворачиваем в wide-формат: строки = время, столбцы = глубина
-adcp_Ve = adcp_raw.pivot_table(index='datetime', columns='Depth', values='Ve', aggfunc='mean')
-adcp_Vn = adcp_raw.pivot_table(index='datetime', columns='Depth', values='Vn', aggfunc='mean')
 
-# Преобразуем индекс в DatetimeIndex (нужно для resample)
-adcp_Ve.index = pd.DatetimeIndex(adcp_Ve.index)
-adcp_Vn.index = pd.DatetimeIndex(adcp_Vn.index)
+adcp = load_adcp(adcp_file, os.path.dirname(os.path.abspath(__file__)))
+ctd = load_ctd(ctd_file)
 
-# Интерполируем пропуски по времени (вдоль строк) для каждой глубины
-adcp_Ve = adcp_Ve.interpolate(axis=0, limit=5)
-adcp_Vn = adcp_Vn.interpolate(axis=0, limit=5)
-
-# Скорость и направление
-Ve_grid = adcp_Ve.values          # shape: (ntime, ndepth)
-Vn_grid = adcp_Vn.values
-speed_grid, dir_grid = compute_speed_direction(Ve_grid, Vn_grid)
-
-times = adcp_Ve.index.to_pydatetime()
-depths = adcp_Ve.columns.values
-
-# Шаг дискретизации (в секундах)
-dt_sec = np.median(np.diff([t.timestamp() for t in times]))
-dt_min = dt_sec / 60.0
-fs = 1.0 / dt_sec  # Гц
-
-print(f"Временной шаг ADCP: {dt_sec:.1f} с ({dt_min:.2f} мин)")
-print(f"Количество горизонтов: {len(depths)}, глубины: {depths[0]:.1f}–{depths[-1]:.1f} м")
-
-# =========================================================
-# 5. ЧТЕНИЕ CTD
-# =========================================================
-ctd = pd.read_csv(ctd_file, sep=',', encoding='cp1251')
-
-ctd['datetime'] = pd.to_datetime(ctd['DATE'] + ' ' + ctd['TIME'], errors='coerce')
-
-ctd = ctd.dropna(subset=[
-    'Temp',
-    'Sal(psu)',
-    'Pressure(psia)',
-    'Depth(m)',
-    'GPSLatitude',
-    'GPSLongitude',
-    'datetime'
-])
-
-# =========================================================
-# 6. ЧАСТОТА ВЯЙСЯЛЯ–БРЕНТА (CTD)
-# =========================================================
-ctd = ctd.sort_values('Depth(m)').reset_index(drop=True)
-ctd = ctd.loc[ctd['Depth(m)'].diff().fillna(1) != 0]
-
-p = ctd['Depth(m)'].values  # приближение давления
-
+# CTD: расчет N(z) через TEOS-10
+lat, lon, g = 44.5, 37.98, 9.81
+ctd = ctd.sort_values("Depth(m)").dropna(subset=["Depth(m)", "Temp", "Sal"]).reset_index(drop=True)
+depth_ctd = np.abs(ctd["Depth(m)"].to_numpy(dtype=float))
+p_dbar = gsw.p_from_z(-depth_ctd, lat)
 SA = gsw.SA_from_SP(
-    ctd['Sal(psu)'].values,
-    p,
-    ctd['GPSLongitude'].values,
-    ctd['GPSLatitude'].values
+    ctd["Sal"].to_numpy(dtype=float),
+    p_dbar,
+    lon,
+    lat,
 )
-
-CT = gsw.CT_from_t(SA, ctd['Temp'].values, p)
-rho = gsw.rho(SA, CT, p)
-
-drho_dz = np.gradient(rho, ctd['Depth(m)'].values)
-
-g = 9.81
-rho0 = 1025
-
+CT = gsw.CT_from_t(SA, ctd["Temp"].to_numpy(dtype=float), p_dbar)
+rho = gsw.rho(SA, CT, p_dbar)
+# Для устойчивого d(rho)/dz усредняем профиль по уникальным глубинам.
+rho_prof_df = pd.DataFrame({"Depth(m)": depth_ctd, "rho": rho}).dropna()
+rho_prof_df = rho_prof_df.groupby("Depth(m)", as_index=False).mean().sort_values("Depth(m)")
+if len(rho_prof_df) < 2:
+    raise ValueError("Недостаточно уникальных глубин CTD для расчета частоты Вяйсяля–Брента.")
+depth_profile = rho_prof_df["Depth(m)"].to_numpy(dtype=float)
+rho_profile = rho_prof_df["rho"].to_numpy(dtype=float)
+rho0 = np.where(rho_profile <= 0, np.nan, rho_profile)
+drho_dz = np.gradient(rho_profile, depth_profile)
 N2 = -g / rho0 * drho_dz
 N = np.sqrt(np.clip(N2, 0, None))
+N_cph = N * 3600.0 / (2.0 * np.pi)
 
-fig, ax = plt.subplots(figsize=(5, 7))
-ax.plot(N, ctd['Depth(m)'], linewidth=1.5)
-ax.invert_yaxis()
-ax.grid(True)
-ax.set_xlabel('Частота Вяйсяля–Брента N, рад/с')
-ax.set_ylabel('Глубина, м')
-ax.set_title('Вертикальный профиль частоты\nВяйсяля–Брента по данным CTD')
-plt.tight_layout()
-plt.savefig('fig_01_brunt_vaisala.png', dpi=150)
-plt.close()
+plt.figure(figsize=(5, 7))
+plt.plot(N_cph, depth_profile, linewidth=1.5)
+plt.gca().invert_yaxis()
+plt.grid(True)
+plt.xlabel('Частота Вяйсяля–Брента N, цикл/час')
+plt.ylabel('Глубина, м')
+plt.title('Профиль частоты Вяйсяля–Брента N(z)')
+plt.show()
+plt.close('all')
 
 # =========================================================
-# 7. ГРАФИКИ ГЛУБИНА–ВРЕМЯ (U, V, СКОРОСТЬ, НАПРАВЛЕНИЕ)
+# 6. ADCP: U, V, скорость, направление; усреднение 30 мин
 # =========================================================
-T_mpl = mdates.date2num(times)
-D_mesh, T_mesh = np.meshgrid(depths, T_mpl)
+adcp = adcp.copy()
+adcp['datetime'] = pd.to_datetime(adcp['datetime'], errors='coerce')
+adcp = adcp.dropna(subset=['datetime'])
+adcp['U'] = adcp['Ve'].astype(float)
+adcp['V'] = adcp['Vn'].astype(float)
+adcp['speed'] = np.hypot(adcp['U'], adcp['V'])
+# Направление течения (куда направлен вектор), от севера по часовой, градусы
+adcp['direction'] = (np.degrees(np.arctan2(adcp['U'], adcp['V'])) + 360) % 360
 
-def make_depth_time_plot(data, depths, times_mpl, title, cbar_label, cmap,
-                         fname, vmin=None, vmax=None):
-    fig, ax = plt.subplots(figsize=(14, 5))
-    pcm = ax.pcolormesh(
-        T_mesh, D_mesh, data,
-        shading='nearest', cmap=cmap,
-        vmin=vmin, vmax=vmax
-    )
-    ax.invert_yaxis()
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m\n%H:%M'))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    plt.colorbar(pcm, ax=ax, label=cbar_label)
-    ax.set_xlabel('Дата/время')
+low = 1 / (15*60)
+high = 1 / (5*60)
+adcp_z = adcp.dropna(subset=['Depth'])
+adcp_30 = (
+    adcp_z.groupby([pd.Grouper(key='datetime', freq='30min'), 'Depth'])[
+        ['U', 'V', 'speed', 'direction']
+    ]
+    .mean()
+    .reset_index()
+)
+
+# «Среднее по вертикали»: векторное усреднение U, V по горизонтам на каждый момент
+adcp_30_mean = (
+    adcp_30.groupby('datetime', as_index=False)
+    .agg(U=('U', 'mean'), V=('V', 'mean'))
+)
+adcp_30_mean['speed'] = np.hypot(adcp_30_mean['U'], adcp_30_mean['V'])
+adcp_30_mean['direction'] = (
+    np.degrees(np.arctan2(adcp_30_mean['U'], adcp_30_mean['V'])) + 360
+) % 360
+adcp_30_mean['Depth'] = np.nan
+
+depths_avail = np.sort(adcp_30['Depth'].dropna().unique())
+horizons = pick_horizons(depths_avail, n=3)
+# привязка к фактическим бинам ADCP
+horizons = [nearest_depth(depths_avail, h) for h in horizons]
+horizons = list(dict.fromkeys([h for h in horizons if h is not None]))
+
+# =========================================================
+# 7. Картины распределения по глубине и времени
+# =========================================================
+# Окно 1: скорость и направление
+fig_sd, (ax_s, ax_d) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, sharey=True)
+hovmoller_pcolormesh(
+    ax_s,
+    adcp_30,
+    'speed',
+    'Скорость течения |V| (время–глубина, 30 мин усреднение)',
+    'м/с',
+    cmap='jet'
+)
+if np.isfinite(adcp_30['speed']).any():
+    speed_max = float(np.nanmax(adcp_30['speed']))
+else:
+    speed_max = 1.0
+for coll in ax_s.collections:
+    coll.set_clim(0.0, speed_max)
+hovmoller_pcolormesh(
+    ax_d,
+    adcp_30,
+    'direction',
+    'Направление течения (0–360°, время–глубина, 30 мин усреднение)',
+    '°',
+    cmap='hsv'
+)
+for coll in ax_d.collections:
+    coll.set_clim(0.0, 360.0)
+for ax in [ax_s, ax_d]:
     ax.set_ylabel('Глубина, м')
-    ax.set_title(title)
-    plt.tight_layout()
-    plt.savefig(fname, dpi=150)
-    plt.close()
+    ax.set_xlabel('Дата')
+fig_sd.tight_layout()
+plt.show()
+plt.close(fig_sd)
 
-# Симметричные пределы для компонент скорости
-u_lim = np.nanpercentile(np.abs(Ve_grid), 98)
-v_lim = np.nanpercentile(np.abs(Vn_grid), 98)
-
-make_depth_time_plot(
-    Ve_grid, depths, T_mpl,
-    'Зональная компонента скорости (U), м/с',
-    'U, м/с', 'RdBu_r',
-    'fig_02_depth_time_U.png',
-    vmin=-u_lim, vmax=u_lim
+# Окно 2: компоненты U и V
+fig_uv, (ax_u, ax_v) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, sharey=True)
+hovmoller_pcolormesh(
+    ax_u,
+    adcp_30,
+    'U',
+    'Компонента U (восток +, запад -, время–глубина, 30 мин)',
+    'м/с',
+    cmap='RdBu_r'
 )
-
-make_depth_time_plot(
-    Vn_grid, depths, T_mpl,
-    'Меридиональная компонента скорости (V), м/с',
-    'V, м/с', 'RdBu_r',
-    'fig_03_depth_time_V.png',
-    vmin=-v_lim, vmax=v_lim
+hovmoller_pcolormesh(
+    ax_v,
+    adcp_30,
+    'V',
+    'Компонента V (север +, юг -, время–глубина, 30 мин)',
+    'м/с',
+    cmap='RdBu_r'
 )
+for ax in [ax_u, ax_v]:
+    ax.set_ylabel('Глубина, м')
+    ax.set_xlabel('Дата')
+fig_uv.tight_layout()
+plt.show()
+plt.close(fig_uv)
 
-make_depth_time_plot(
-    speed_grid, depths, T_mpl,
-    'Скорость течения, м/с',
-    'Скорость, м/с', 'viridis',
-    'fig_04_depth_time_speed.png',
-    vmin=0
+# =========================================================
+# 9. Статистические параметры течений (30-мин ряды)
+# =========================================================
+rows = []
+for d in horizons:
+    w = adcp_30[np.isclose(adcp_30['Depth'], d)].sort_values('datetime')
+    st = current_stats_table(w['U'].values, w['V'].values, w['speed'].values)
+    if 'N_rev' not in st:
+        st['N_rev'] = 0
+    st['Глубина, м'] = d
+    rows.append(st)
+
+st_mean = current_stats_table(
+    adcp_30_mean['U'].values, adcp_30_mean['V'].values, adcp_30_mean['speed'].values
 )
-
-make_depth_time_plot(
-    dir_grid, depths, T_mpl,
-    'Направление течения, °',
-    'Направление, °', 'hsv',
-    'fig_05_depth_time_dir.png',
-    vmin=0, vmax=360
-)
-
-# =========================================================
-# 8. ВРЕМЕННЫЕ РЯДЫ U И V — НЕСКОЛЬКО ГОРИЗОНТОВ
-# =========================================================
-# Выбираем несколько горизонтов равномерно
-n_sel = min(6, len(depths))
-sel_idx = np.linspace(0, len(depths) - 1, n_sel, dtype=int)
-sel_depths = depths[sel_idx]
-
-colors = plt.cm.plasma(np.linspace(0.1, 0.9, n_sel))
-
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-for i, (idx, d) in enumerate(zip(sel_idx, sel_depths)):
-    u_ts = adcp_Ve.iloc[:, idx].values
-    v_ts = adcp_Vn.iloc[:, idx].values
-    lbl = f'{d:.1f} м'
-    axes[0].plot(times, u_ts, color=colors[i], linewidth=0.9, label=lbl)
-    axes[1].plot(times, v_ts, color=colors[i], linewidth=0.9, label=lbl)
-
-for ax, ylabel, title in zip(axes,
-                              ['U (зональная), м/с', 'V (меридиональная), м/с'],
-                              ['Зональная компонента скорости (U)', 'Меридиональная компонента скорости (V)']):
-    ax.grid(True, linewidth=0.5)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend(loc='upper right', ncol=3, fontsize=8)
-    fmt_time_axis(ax)
-
-axes[1].set_xlabel('Дата/время')
-plt.tight_layout()
-plt.savefig('fig_06_timeseries_UV.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 9. УСРЕДНЕНИЕ ПО 30 МИН ДЛЯ СТАТИСТИКИ
-# =========================================================
-adcp_Ve_30 = adcp_Ve.resample('30min').mean()
-adcp_Vn_30 = adcp_Vn.resample('30min').mean()
-
-# =========================================================
-# 10. СТАТИСТИЧЕСКИЕ ПАРАМЕТРЫ ТЕЧЕНИЙ
-# =========================================================
-stats_rows = []
-
-for d in depths:
-    row = stats_table(adcp_Ve_30[d], adcp_Vn_30[d], f'{d:.1f} м')
-    stats_rows.append(row)
-
-# Среднее по вертикали
-Ve_mean_col = adcp_Ve_30.mean(axis=1)
-Vn_mean_col = adcp_Vn_30.mean(axis=1)
-row_mean = stats_table(Ve_mean_col, Vn_mean_col, 'Среднее по вертикали')
-stats_rows.append(row_mean)
-
-stats_df = pd.DataFrame(stats_rows)
-stats_df.to_csv('adcp_statistics.csv', index=False, encoding='utf-8-sig')
-print("\nСтатистические параметры течений:")
-print(stats_df.to_string(index=False))
-
-# Визуализация таблицы
-fig, ax = plt.subplots(figsize=(18, max(4, len(stats_df) * 0.4 + 1.5)))
-ax.axis('off')
-col_labels = stats_df.columns.tolist()
-tbl = ax.table(
-    cellText=stats_df.values,
-    colLabels=col_labels,
-    loc='center',
-    cellLoc='center'
-)
-tbl.auto_set_font_size(False)
-tbl.set_fontsize(8)
-tbl.auto_set_column_width(col=list(range(len(col_labels))))
-ax.set_title('Статистические параметры течений (усреднение 30 мин)', pad=10, fontsize=11)
-plt.tight_layout()
-plt.savefig('fig_07_statistics_table.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 11. ГИСТОГРАММЫ СКОРОСТИ И НАПРАВЛЕНИЯ
-# =========================================================
-# Выбираем горизонты + среднее
-hist_depths_idx = list(sel_idx) + [-1]   # -1 → среднее по вертикали
-hist_labels = [f'{depths[i]:.1f} м' for i in sel_idx] + ['Среднее по вертикали']
-
-fig_speed, axes_sp = plt.subplots(
-    2, len(hist_depths_idx), figsize=(4 * len(hist_depths_idx), 8)
-)
-
-for col_i, (d_idx, lbl) in enumerate(zip(hist_depths_idx, hist_labels)):
-    if d_idx == -1:
-        u_vals = adcp_Ve_30.mean(axis=1).dropna().values
-        v_vals = adcp_Vn_30.mean(axis=1).dropna().values
-    else:
-        u_vals = adcp_Ve_30.iloc[:, d_idx].dropna().values
-        v_vals = adcp_Vn_30.iloc[:, d_idx].dropna().values
-
-    speed_vals, dir_vals = compute_speed_direction(u_vals, v_vals)
-
-    ax_sp = axes_sp[0, col_i]
-    ax_dir = axes_sp[1, col_i]
-
-    ax_sp.hist(speed_vals, bins=30, color='steelblue', edgecolor='white', linewidth=0.3)
-    ax_sp.set_title(lbl, fontsize=9)
-    ax_sp.set_xlabel('Скорость, м/с')
-    ax_sp.set_ylabel('Частота')
-    ax_sp.grid(True, linewidth=0.4)
-
-    ax_dir.hist(dir_vals, bins=36, range=(0, 360), color='darkorange',
-                edgecolor='white', linewidth=0.3)
-    ax_dir.set_xlabel('Направление, °')
-    ax_dir.set_ylabel('Частота')
-    ax_dir.set_xticks([0, 90, 180, 270, 360])
-    ax_dir.grid(True, linewidth=0.4)
-
-axes_sp[0, 0].set_title(hist_labels[0] + '\n(скорость)', fontsize=9)
-axes_sp[1, 0].set_title(hist_labels[0] + '\n(направление)', fontsize=9)
-fig_speed.suptitle('Гистограммы скорости (верхний ряд) и направления течений (нижний ряд)',
-                   fontsize=11)
-plt.tight_layout()
-plt.savefig('fig_08_histograms.png', dpi=150)
-plt.close()
-
-# Розы ветра / направлений (полярные диаграммы)
-fig_rose, axes_rose = plt.subplots(
-    1, len(hist_depths_idx),
-    subplot_kw={'projection': 'polar'},
-    figsize=(4 * len(hist_depths_idx), 5)
-)
-
-bin_edges = np.linspace(0, 2 * np.pi, 37)
-bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-width = bin_edges[1] - bin_edges[0]
-
-for col_i, (d_idx, lbl) in enumerate(zip(hist_depths_idx, hist_labels)):
-    if d_idx == -1:
-        u_vals = adcp_Ve_30.mean(axis=1).dropna().values
-        v_vals = adcp_Vn_30.mean(axis=1).dropna().values
-    else:
-        u_vals = adcp_Ve_30.iloc[:, d_idx].dropna().values
-        v_vals = adcp_Vn_30.iloc[:, d_idx].dropna().values
-
-    speed_vals, dir_vals = compute_speed_direction(u_vals, v_vals)
-    dir_rad = np.radians(dir_vals)
-    counts, _ = np.histogram(dir_rad, bins=bin_edges)
-    ax_r = axes_rose[col_i]
-    ax_r.bar(bin_centers, counts, width=width, color='teal', alpha=0.8)
-    ax_r.set_theta_zero_location('N')
-    ax_r.set_theta_direction(-1)
-    ax_r.set_title(lbl, va='bottom', fontsize=9)
-
-fig_rose.suptitle('Роза направлений течений', fontsize=11)
-plt.tight_layout()
-plt.savefig('fig_09_rose_direction.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 12. СПЕКТРЫ МОЩНОСТИ — ЗОНАЛЬНАЯ КОМПОНЕНТА
-# =========================================================
-# Проверяем дискретность: берём данные на выбранных горизонтах
-# Эксперимент с различными окнами nperseg
-
-nperseg_variants = {
-    '256 (узкое)': 256,
-    '512': 512,
-    '1024': 1024,
-    '2048 (широкое)': 2048,
-}
-
-fig_spec, axes_spec = plt.subplots(
-    1, len(sel_idx), figsize=(4 * len(sel_idx), 5), sharey=False
-)
-if len(sel_idx) == 1:
-    axes_spec = [axes_spec]
-
-for col_i, (idx, d) in enumerate(zip(sel_idx, sel_depths)):
-    u_ts = adcp_Ve.iloc[:, idx].dropna().values
-    u_ts = u_ts - np.mean(u_ts)
-
-    ax = axes_spec[col_i]
-    for lbl, nperseg_val in nperseg_variants.items():
-        nperseg_actual = min(nperseg_val, len(u_ts) // 2)
-        if nperseg_actual < 32:
-            continue
-        f_w, Pxx = welch(
-            u_ts,
-            fs=fs,
-            window='hann',
-            nperseg=nperseg_actual,
-            noverlap=nperseg_actual // 2,
-            detrend='linear'
-        )
-        mask = f_w > 0
-        T_min = 1.0 / f_w[mask] / 60.0
-        ax.loglog(T_min, Pxx[mask], linewidth=1.0, label=lbl)
-
-    ax.invert_xaxis()
-    ax.grid(True, which='both', linewidth=0.4)
-    ax.set_xlabel('Период, мин')
-    ax.set_ylabel('СПМ, (м/с)²/Гц') if col_i == 0 else None
-    ax.set_title(f'{d:.1f} м')
-    ax.legend(fontsize=7)
-
-fig_spec.suptitle(
-    f'Спектр мощности зональной компоненты U\n'
-    f'(шаг: {dt_min:.2f} мин, окно Хэннинга, перекрытие 50%)',
-    fontsize=10
-)
-plt.tight_layout()
-plt.savefig('fig_10_power_spectrum_U.png', dpi=150)
-plt.close()
-
-# То же для меридиональной компоненты
-fig_spec_v, axes_spec_v = plt.subplots(
-    1, len(sel_idx), figsize=(4 * len(sel_idx), 5), sharey=False
-)
-if len(sel_idx) == 1:
-    axes_spec_v = [axes_spec_v]
-
-for col_i, (idx, d) in enumerate(zip(sel_idx, sel_depths)):
-    v_ts = adcp_Vn.iloc[:, idx].dropna().values
-    v_ts = v_ts - np.mean(v_ts)
-
-    ax = axes_spec_v[col_i]
-    for lbl, nperseg_val in nperseg_variants.items():
-        nperseg_actual = min(nperseg_val, len(v_ts) // 2)
-        if nperseg_actual < 32:
-            continue
-        f_w, Pxx = welch(
-            v_ts,
-            fs=fs,
-            window='hann',
-            nperseg=nperseg_actual,
-            noverlap=nperseg_actual // 2,
-            detrend='linear'
-        )
-        mask = f_w > 0
-        T_min = 1.0 / f_w[mask] / 60.0
-        ax.loglog(T_min, Pxx[mask], linewidth=1.0, label=lbl)
-
-    ax.invert_xaxis()
-    ax.grid(True, which='both', linewidth=0.4)
-    ax.set_xlabel('Период, мин')
-    ax.set_ylabel('СПМ, (м/с)²/Гц') if col_i == 0 else None
-    ax.set_title(f'{d:.1f} м')
-    ax.legend(fontsize=7)
-
-fig_spec_v.suptitle(
-    f'Спектр мощности меридиональной компоненты V\n'
-    f'(шаг: {dt_min:.2f} мин, окно Хэннинга, перекрытие 50%)',
-    fontsize=10
-)
-plt.tight_layout()
-plt.savefig('fig_11_power_spectrum_V.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 13. ПОЛОСОВАЯ ФИЛЬТРАЦИЯ (5–15 МИН)
-# =========================================================
-low  = 1.0 / (15 * 60)
-high = 1.0 / ( 5 * 60)
-
-b, a = butter(2, [low / (fs / 2), high / (fs / 2)], btype='band')
-
-Ve_filt = np.full_like(Ve_grid, np.nan)
-Vn_filt = np.full_like(Vn_grid, np.nan)
-
-for col_i in range(Ve_grid.shape[1]):
-    u_col = Ve_grid[:, col_i]
-    v_col = Vn_grid[:, col_i]
-
-    valid_u = np.isfinite(u_col)
-    valid_v = np.isfinite(v_col)
-
-    if valid_u.sum() > 4 * (len(b) - 1):
-        u_tmp = np.where(valid_u, u_col, 0.0)
-        Ve_filt[:, col_i] = np.where(valid_u, filtfilt(b, a, u_tmp), np.nan)
-
-    if valid_v.sum() > 4 * (len(b) - 1):
-        v_tmp = np.where(valid_v, v_col, 0.0)
-        Vn_filt[:, col_i] = np.where(valid_v, filtfilt(b, a, v_tmp), np.nan)
-
-u_f_lim = np.nanpercentile(np.abs(Ve_filt), 98)
-v_f_lim = np.nanpercentile(np.abs(Vn_filt), 98)
-
-make_depth_time_plot(
-    Ve_filt, depths, T_mpl,
-    'Отфильтрованная зональная компонента (5–15 мин), м/с',
-    'U filtered, м/с', 'RdBu_r',
-    'fig_12_depth_time_U_filtered.png',
-    vmin=-u_f_lim, vmax=u_f_lim
-)
-make_depth_time_plot(
-    Vn_filt, depths, T_mpl,
-    'Отфильтрованная меридиональная компонента (5–15 мин), м/с',
-    'V filtered, м/с', 'RdBu_r',
-    'fig_13_depth_time_V_filtered.png',
-    vmin=-v_f_lim, vmax=v_f_lim
-)
-
-# Временные ряды полосовых компонент на выбранных горизонтах
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-for i, (idx, d) in enumerate(zip(sel_idx, sel_depths)):
-    lbl = f'{d:.1f} м'
-    axes[0].plot(times, Ve_filt[:, idx], color=colors[i], linewidth=0.9, label=lbl)
-    axes[1].plot(times, Vn_filt[:, idx], color=colors[i], linewidth=0.9, label=lbl)
-
-for ax, ylabel, title in zip(
-    axes,
-    ['U (5–15 мин), м/с', 'V (5–15 мин), м/с'],
-    ['Зональная компонента (полосовой фильтр 5–15 мин)',
-     'Меридиональная компонента (полосовой фильтр 5–15 мин)']
-):
-    ax.grid(True, linewidth=0.5)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend(loc='upper right', ncol=3, fontsize=8)
-    fmt_time_axis(ax)
-
-axes[1].set_xlabel('Дата/время')
-plt.tight_layout()
-plt.savefig('fig_14_timeseries_UV_filtered.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 14. ВЕЙВЛЕТ-АНАЛИЗ (ПЕРВЫЙ ГОРИЗОНТ)
-# =========================================================
-ref_idx = sel_idx[len(sel_idx) // 2]  # средний горизонт
-ref_depth = depths[ref_idx]
-step = max(1, int(round(60 / dt_sec)))  # прореживаем до ~1 мин
-
-Ve_w = Ve_filt[::step, ref_idx]
-dt_w = dt_sec * step
-
-periods = np.linspace(5, 15, 40)
-scales = periods * 60.0 / (2.0 * np.pi)
-
-coeffs, _ = pywt.cwt(
-    np.nan_to_num(Ve_w), scales, 'morl', sampling_period=dt_w
-)
-
-t_w = times[::step]
-
-fig, ax = plt.subplots(figsize=(14, 5))
-T_wv, P_wv = np.meshgrid(mdates.date2num(t_w), periods)
-pcm = ax.pcolormesh(T_wv, P_wv, np.abs(coeffs), shading='nearest', cmap='jet')
-ax.invert_yaxis()
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m\n%H:%M'))
-ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-plt.colorbar(pcm, ax=ax, label='Амплитуда')
-ax.set_xlabel('Дата/время')
-ax.set_ylabel('Период, мин')
-ax.set_title(f'Вейвлет-анализ (5–15 мин), горизонт {ref_depth:.1f} м')
-plt.tight_layout()
-plt.savefig('fig_15_wavelet.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 15. ОЦЕНКА НАПРАВЛЕНИЯ РАСПРОСТРАНЕНИЯ ВОЛН (МЕТОД ХИЛБЕРТА)
-# =========================================================
-from scipy.signal import hilbert as sp_hilbert
-
-Ve_h_col = Ve_filt[:, ref_idx]
-Vn_h_col = Vn_filt[:, ref_idx]
-
-valid = np.isfinite(Ve_h_col) & np.isfinite(Vn_h_col)
-Ve_h_clean = np.where(valid, Ve_h_col, 0.0)
-Vn_h_clean = np.where(valid, Vn_h_col, 0.0)
-
-analytic_Ve = sp_hilbert(Ve_h_clean)
-analytic_Vn = sp_hilbert(Vn_h_clean)
-
-phase_diff = np.angle(analytic_Vn) - np.angle(analytic_Ve)
-direction_hilbert = np.degrees(np.arctan2(
-    np.sin(phase_diff),
-    np.cos(phase_diff)
-))
-direction_hilbert[~valid] = np.nan
-
-fig, ax = plt.subplots(figsize=(14, 4))
-ax.plot(times, direction_hilbert, linewidth=0.8, color='purple')
-ax.grid(True, linewidth=0.5)
-fmt_time_axis(ax)
-ax.set_xlabel('Дата/время')
-ax.set_ylabel('Фазовый угол, °')
-ax.set_title(f'Оценка направления коротких волн (метод Гильберта), горизонт {ref_depth:.1f} м')
-plt.tight_layout()
-plt.savefig('fig_16_wave_direction_hilbert.png', dpi=150)
-plt.close()
-
-# =========================================================
-# 16. ПРОГРЕССИВНЫЕ ВЕКТОРНЫЕ ДИАГРАММЫ (PVD)
-# =========================================================
-# PVD: кумулятивная интеграция (U,V) по времени — условный перенос водной массы.
-# Реализация как в Khimchenko et al. (JMSE, 2022):
-#   X(t) = ∑ U(t_i) * Δt
-#   Y(t) = ∑ V(t_i) * Δt
-
-fig_pvd, axes_pvd = plt.subplots(
-    2, (len(sel_idx) + 1) // 2,
-    figsize=(5 * ((len(sel_idx) + 1) // 2), 10)
-)
-axes_pvd_flat = np.array(axes_pvd).flatten()
-
-for i, (idx, d) in enumerate(zip(sel_idx, sel_depths)):
-    u_pvd = adcp_Ve.iloc[:, idx].values
-    v_pvd = adcp_Vn.iloc[:, idx].values
-
-    # Убираем NaN линейной интерполяцией перед интегрированием
-    u_series = pd.Series(u_pvd).interpolate(limit=10).fillna(0).values
-    v_series = pd.Series(v_pvd).interpolate(limit=10).fillna(0).values
-
-    X = np.cumsum(u_series) * dt_sec / 1000.0  # км
-    Y = np.cumsum(v_series) * dt_sec / 1000.0
-
-    # Цвет по времени
-    npts = len(X)
-    seg_colors = plt.cm.plasma(np.linspace(0, 1, npts - 1))
-
-    ax_pvd = axes_pvd_flat[i]
-    for j in range(npts - 1):
-        ax_pvd.plot(X[j:j+2], Y[j:j+2], color=seg_colors[j], linewidth=0.7)
-
-    ax_pvd.plot(X[0], Y[0], 'go', markersize=5, label='Начало')
-    ax_pvd.plot(X[-1], Y[-1], 'rs', markersize=5, label='Конец')
-    ax_pvd.set_aspect('equal', 'box')
-    ax_pvd.grid(True, linewidth=0.4)
-    ax_pvd.set_xlabel('X (зональный перенос), км')
-    ax_pvd.set_ylabel('Y (меридиональный перенос), км')
-    ax_pvd.set_title(f'PVD, горизонт {d:.1f} м')
-    ax_pvd.legend(fontsize=7)
-
-# Скрыть лишние subplot-ы
-for j in range(len(sel_idx), len(axes_pvd_flat)):
-    axes_pvd_flat[j].set_visible(False)
-
-# Цветовая полоска как шкала времени
-sm = plt.cm.ScalarMappable(cmap='plasma',
-                            norm=plt.Normalize(vmin=0, vmax=(npts - 1) * dt_sec / 3600))
-sm.set_array([])
-fig_pvd.colorbar(sm, ax=axes_pvd_flat[:len(sel_idx)], label='Время от начала, ч',
-                 fraction=0.02, pad=0.04)
-fig_pvd.suptitle('Прогрессивные векторные диаграммы течений', fontsize=12)
-plt.tight_layout()
-plt.savefig('fig_17_progressive_vector.png', dpi=150)
-plt.close()
-
-print("\nВсе рисунки сохранены:")
-figs = [
-    'fig_01_brunt_vaisala.png',
-    'fig_02_depth_time_U.png',
-    'fig_03_depth_time_V.png',
-    'fig_04_depth_time_speed.png',
-    'fig_05_depth_time_dir.png',
-    'fig_06_timeseries_UV.png',
-    'fig_07_statistics_table.png',
-    'fig_08_histograms.png',
-    'fig_09_rose_direction.png',
-    'fig_10_power_spectrum_U.png',
-    'fig_11_power_spectrum_V.png',
-    'fig_12_depth_time_U_filtered.png',
-    'fig_13_depth_time_V_filtered.png',
-    'fig_14_timeseries_UV_filtered.png',
-    'fig_15_wavelet.png',
-    'fig_16_wave_direction_hilbert.png',
-    'fig_17_progressive_vector.png',
-    'adcp_statistics.csv',
+if 'N_rev' not in st_mean:
+    st_mean['N_rev'] = 0
+st_mean['Глубина, м'] = 'среднее (верт.)'
+rows.append(st_mean)
+stats_df = pd.DataFrame(rows)
+if 'N_rev' not in stats_df.columns:
+    stats_df['N_rev'] = 0
+stats_df['N_rev'] = pd.to_numeric(stats_df['N_rev'], errors='coerce').fillna(0).astype(int)
+col_order = [
+    'Глубина, м',
+    'mean_U',
+    'mean_V',
+    'mean_speed',
+    'max_speed',
+    'min_speed',
+    'std_speed',
+    'U_pos_pct',
+    'U_neg_pct',
+    'N_rev',
 ]
-for f in figs:
-    print(f'  {f}')
+stats_df = stats_df[[c for c in col_order if c in stats_df.columns]]
+rename_ru = {
+    'mean_U': 'U ср, м/с',
+    'mean_V': 'V ср, м/с',
+    'mean_speed': '|V| ср, м/с',
+    'max_speed': '|V| max, м/с',
+    'min_speed': '|V| min, м/с',
+    'std_speed': 'std |V|, м/с',
+    'U_pos_pct': 'U pos, %',
+    'U_neg_pct': 'U neg, %',
+    'N_rev': 'N rev',
+}
+stats_show = stats_df.rename(columns=rename_ru)
+print('\n=== Статистика течений (усреднение 30 мин) ===')
+print(stats_show.to_string(index=False))
+
+# =========================================================
+# 10. Прогрессивные векторные диаграммы (PVD)
+# =========================================================
+n_pvd = len(horizons) + 1
+ncols, nrows = 2, 2
+fig, axes = plt.subplots(nrows, ncols, figsize=(9, 8), squeeze=False)
+axes = np.atleast_2d(axes)
+idx = 0
+for d in horizons:
+    r, c = divmod(idx, ncols)
+    sub = adcp_30[np.isclose(adcp_30['Depth'], d)]
+    progressive_vector_diagram(axes[r, c], sub, f'PVD, глубина {d:g} м (30 мин)')
+    idx += 1
+r, c = divmod(idx, ncols)
+sub_mean = adcp_30_mean.copy()
+sub_mean['Depth'] = np.nan
+progressive_vector_diagram(axes[r, c], sub_mean, 'PVD, среднее по вертикали (30 мин)')
+idx += 1
+for k in range(idx, nrows * ncols):
+    r, c = divmod(k, ncols)
+    axes[r, c].axis('off')
+plt.suptitle('Прогрессивные векторные диаграммы течений (интеграл U·dt, V·dt)')
+plt.tight_layout()
+plt.show()
+plt.close('all')
