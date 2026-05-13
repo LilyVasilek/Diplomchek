@@ -121,12 +121,17 @@ def hovmoller_pcolormesh(ax, df, var, title, cbar_label, cmap='RdBu_r',
     plt.colorbar(im, ax=ax, label=cbar_label)
 
 
-def progressive_vector_diagram(ax, sub, title):
+def progressive_vector_diagram(ax, sub, title, max_days=7):
     """
     Прогрессивная векторная диаграмма:
     X(t) = ΣU·Δt,  Y(t) = ΣV·Δt  (метод Khimchenko et al., JMSE 2022).
+    max_days: максимальная длина ряда (дни). Берётся последний связный участок.
     """
     sub = sub.sort_values('datetime').dropna(subset=['U', 'V'])
+    # Ограничиваем длину для физической интерпретируемости
+    if len(sub) > 0 and max_days is not None:
+        cutoff = sub['datetime'].max() - pd.Timedelta(days=max_days)
+        sub = sub[sub['datetime'] >= cutoff]
     if len(sub) < 2:
         ax.text(0.5, 0.5, 'Недостаточно данных',
                 ha='center', va='center', transform=ax.transAxes)
@@ -430,6 +435,10 @@ colors = plt.cm.plasma(np.linspace(0.1, 0.9, len(horizons)))
 fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
 for i, d in enumerate(horizons):
     sub = adcp_30[np.isclose(adcp_30['Depth'], d)].sort_values('datetime')
+    # Вставляем NaN в пропуски > 1 часа, чтобы не соединять артефакты прямыми линиями
+    sub = sub.set_index('datetime').reindex(
+        pd.date_range(sub['datetime'].min(), sub['datetime'].max(), freq='30min')
+    ).reset_index().rename(columns={'index': 'datetime'})
     lbl = f'{d:.1f} м'
     axes[0].plot(sub['datetime'], sub['U'], color=colors[i], lw=0.9, label=lbl)
     axes[1].plot(sub['datetime'], sub['V'], color=colors[i], lw=0.9, label=lbl)
