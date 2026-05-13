@@ -110,8 +110,10 @@ N_profile = np.sqrt(np.clip(N2, 0, None))           # рад/с
 N_profile_cph = N_profile * 3600.0 / (2.0 * np.pi)  # цикл/час
 
 N_max_cph = np.nanmax(N_profile_cph)
+N_max_rads = np.nanmax(N_profile)
 z_max = median_depths[np.nanargmax(N_profile_cph)]
 T_min_N = 60.0 / N_max_cph  # период в минутах
+print(f"\nN_max = {N_max_rads:.4e} рад/с  =  {N_max_cph:.1f} цикл/час  (T = {T_min_N:.1f} мин,  z = {z_max:.1f} м)")
 
 plt.figure(figsize=(5, 7))
 plt.plot(N_profile_cph, median_depths, color="darkcyan", lw=1.5, label="N(z)")
@@ -291,7 +293,7 @@ for idx, T_iso in enumerate(iso_values):
     mg = (f_psd > fin) & (f_psd < N_iso)
     S_GM[mg] = C_M * (fin * np.sqrt(f_psd[mg] ** 2 - fin ** 2)) / (N_iso * f_psd[mg] ** 3)
 
-    print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.4f} ч⁻¹")
+    print(f"  {T_iso}°C: z̄ = {z_mean:.1f} м, N(z̄) = {N_iso:.2f} цикл/час")
 
     lbl = f"{T_iso}°C ({iso_labels[idx]})"
 
@@ -310,7 +312,7 @@ for idx, T_iso in enumerate(iso_values):
     mgp = (f_psd > 0) & np.isfinite(S_GM) & (S_GM > 0)
     if np.any(mgp):
         ax_psd.loglog(f_psd[mgp], S_GM[mgp], color="black", ls=gm_styles[idx], lw=1.5,
-                      alpha=0.8, label=f"Г–М {T_iso}°C (N={N_iso:.2f})")
+                      alpha=0.8, label=f"Г–М {T_iso}°C (N={N_iso:.2f} цикл/час)")
 
 # --- Пунктир частоты Вяйсяля–Брента ---
 N_mean = (np.nanmean(N_profile) / (2 * np.pi)) * 3600
@@ -319,7 +321,7 @@ for ax in (ax_amp, ax_psd):
     ax.axvline(N_mean, color="black", ls="--", lw=1.3)
 
 ax_amp.plot([], [], color="black", ls="--", lw=1.3,
-            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
+            label=f"$N_{{mean}}$ = {N_mean:.2f} цикл/час")
 
 ax_amp.set_ylabel("Амплитуда, м")
 ax_amp.set_title("Амплитудные спектры изотерм (общий участок)")
@@ -327,8 +329,8 @@ ax_amp.grid(True, which="both", alpha=0.3)
 ax_amp.legend(fontsize=8, loc="best")
 
 ax_psd.plot([], [], color="black", ls="--", lw=1.3,
-            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
-ax_psd.set_xlabel("Частота, 1/час")
+            label=f"$N_{{mean}}$ = {N_mean:.2f} цикл/час")
+ax_psd.set_xlabel("Частота, цикл/час")
 ax_psd.set_ylabel("PSD, м²·час")
 ax_psd.set_title("Спектральная плотность мощности + модель Гарретта–Манка (общий участок)")
 ax_psd.grid(True, which="both", alpha=0.3)
