@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import MultipleLocator
@@ -11,7 +13,7 @@ import os
 # =========================================================
 # ЧТЕНИЕ ДАННЫХ
 # =========================================================
-xlsx_path = r"C:\Документы\ДИПЛОМ\Химченко_данные\Термокосы\st4.xlsx"
+xlsx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4.xlsx")
 sheet_dep, sheet_time, sheet_temp = "dep_n", "ss", "TV"
 depths = pd.read_excel(xlsx_path, sheet_name=sheet_dep, header=None).values
 temps = pd.read_excel(xlsx_path, sheet_name=sheet_temp, header=None).values
@@ -50,7 +52,8 @@ def plot_scheme(depths_arr, outpath=None, show=True):
     if outpath:
         fig.savefig(outpath, dpi=200)
     if show:
-        plt.show()
+        plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig01.png"), dpi=150)
+        plt.close("all")
     return fig, ax
 
 
@@ -81,7 +84,8 @@ plt.xlabel("Дата")
 plt.title("Временная изменчивость температуры")
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
 plt.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig02.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 3. ПОЛЕ ПЛОТНОСТИ (TEOS-10)
@@ -104,7 +108,8 @@ plt.xlabel("Дата")
 plt.title("Временная изменчивость плотности (TEOS-10)")
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
 plt.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig03.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 4. ПРОФИЛЬ ЧАСТОТЫ ВЯЙСЯЛЯ–БРЕНТА  N(z) = √( g/ρ₀(z) · dρ/dz )
@@ -128,7 +133,8 @@ plt.title("Профиль частоты Вяйсяля–Брента")
 plt.grid(True, alpha=0.4)
 plt.legend()
 plt.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig04.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 5–6. ВЫБОР ТРЁХ ИЗОТЕРМ (верхний, средний, нижний слои)
@@ -232,7 +238,8 @@ def plot_period_heatmap_with_isotherms(
     ax.legend(loc="lower right", fontsize=legend_fontsize, ncol=2)
     if show:
         fig.tight_layout()
-        plt.show()
+        plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig05.png"), dpi=150)
+        plt.close("all")
 
 # =========================================================
 # 7. ПОЛЕ ТЕМПЕРАТУРЫ С ВЫДЕЛЕННЫМИ ИЗОТЕРМАМИ
@@ -261,7 +268,8 @@ ax7.set_title("Временная изменчивость температур�
 ax7.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
 ax7.legend(loc="lower right", fontsize=9)
 fig7.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig06.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 8. ОБЩИЙ НЕПРЕРЫВНЫЙ УЧАСТОК + АННОТАЦИЯ
@@ -316,7 +324,8 @@ ax8.text(0.02, 0.02, annotation_text, transform=ax8.transAxes,
          fontsize=10, va="bottom", ha="left",
          bbox=dict(boxstyle="round,pad=0.4", fc="wheat", alpha=0.8))
 fig8.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig07.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # ПАРАМЕТРЫ СПЕКТРАЛЬНОГО АНАЛИЗА
@@ -734,7 +743,7 @@ for ax in (ax_amp, ax_psd):
     ax.axvline(N_mean, color="black", ls="--", lw=1.3)
 
 ax_amp.plot([], [], color="black", ls="--", lw=1.3,
-            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
+            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} цикл/час)")
 
 ax_amp.set_ylabel("Амплитуда, м")
 ax_amp.set_title("Амплитудные спектры изотерм (общий участок)")
@@ -742,8 +751,8 @@ ax_amp.grid(True, which="both", alpha=0.3)
 ax_amp.legend(fontsize=8, loc="best")
 
 ax_psd.plot([], [], color="black", ls="--", lw=1.3,
-            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} ч⁻¹)")
-ax_psd.set_xlabel("Частота, 1/час")
+            label=f"Частота Вяйсяля–Брента ({N_mean:.2f} цикл/час)")
+ax_psd.set_xlabel("Частота, цикл/час")
 ax_psd.set_ylabel("PSD, м²·час")
 ax_psd.set_title("Спектральная плотность мощности + модель Гарретта–Манка (общий участок)")
 ax_psd.grid(True, which="both", alpha=0.3)
@@ -752,7 +761,8 @@ ax_psd.legend(fontsize=8, loc="best")
 fig_sp.suptitle(f"Спектральный анализ на общем участке ({seg_len} точ., {seg_hours:.1f} ч)",
                 y=1.01, fontsize=13)
 fig_sp.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig08.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 12. ЛУЧШАЯ ИЗОТЕРМА СРЕДИ ВСЕХ ИЗОТЕРМ
@@ -832,7 +842,8 @@ ax_best.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m\n%H:%M"))
 ax_best.grid(True, alpha=0.3)
 ax_best.legend(fontsize=9, loc="best")
 fig_best.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig09.png"), dpi=150)
+plt.close("all")
 
 # =========================================================
 # 13. АНАЛИЗ ВСЕЙ ЛУЧШЕЙ ИЗОТЕРМЫ (её непрерывного участка)
@@ -971,7 +982,8 @@ def plot_wave_histograms(H, Tm, title_suffix, out_file):
     fig_hist.tight_layout()
     fig_hist.savefig(out_file, dpi=200)
     print(f"Гистограммы сохранены: {out_file}")
-    plt.show()
+    plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig10.png"), dpi=150)
+    plt.close("all")
 
 
 # Волны на лучшей изотерме.
@@ -1103,7 +1115,7 @@ if len(top_isos) > 0:
         top_k=top_k,
     )
 
-    ax_psd.set_xlabel("Частота, 1/час")
+    ax_psd.set_xlabel("Частота, цикл/час")
     ax_psd.set_ylabel("PSD, м²·час")
     ax_psd.set_title("PSD для изотерм с максимальной повторяемостью волн")
     ax_psd.grid(True, which="both", alpha=0.3)
@@ -1113,7 +1125,8 @@ if len(top_isos) > 0:
     out_psd = "top_repeated_isotherms_psd_full_segment.png"
     fig_psd.savefig(out_psd, dpi=200)
     print(f"График PSD сохранен: {out_psd}")
-    plt.show()
+    plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig11.png"), dpi=150)
+    plt.close("all")
 else:
     print("Нет изотерм с повторяемыми волнами для построения PSD.")
 
@@ -1187,7 +1200,8 @@ for ax, (w0, w1, caption) in zip(axes_short, windows):
         ax.set_xlabel("Время")
         ax.set_ylabel("Глубина, м")
 fig_short.tight_layout()
-plt.show()
+plt.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "st4_fig12.png"), dpi=150)
+plt.close("all")
 
 if np.any(short_mask):
     t_short = t_segment[short_mask]
