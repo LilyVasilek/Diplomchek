@@ -2,7 +2,7 @@
 """Кросс-корреляция изотерм (по замечаниям руководителя).
 
 1) Одна термокоса (T4), изотермы на разных глубинах — матрицы r и временного лага.
-2) Одна глубина, термокосы T1–T4 — лаг прихода сигнала между косами (цуг ±1 ч).
+2) Одна изотерма на T1–T4 (глубина z_iso(t) на каждой косе) — лаг между косами (цуг ±1 ч).
 """
 from __future__ import annotations
 
@@ -163,6 +163,79 @@ def _fill_short_gaps(series: np.ndarray, max_gap: int = 4) -> np.ndarray:
     s = pd.Series(np.asarray(series, dtype=float))
     return s.interpolate(method="linear", limit=max_gap).values
 
+
+
+
+def _iso_depth_on_index(rec: dict, t_index: pd.DatetimeIndex, t_iso: float) -> np.ndarray:
+    """Глубина изотермы t_iso на общей временной сетке t_index."""
+    z_full = iso_depth_series(rec["temps"], rec["md"], t_iso)
+    idx = rec["time"].get_indexer(t_index)
+    out = np.full(len(t_index), np.nan, dtype=float)
+    valid = idx >= 0
+    out[valid] = z_full[idx[valid]]
+    return out
+
+
+def _time_window_mask(
+    t_index: pd.DatetimeIndex,
+    t0: pd.Timestamp | None = None,
+    t1: pd.Timestamp | None = None,
+) -> np.ndarray:
+    mask = np.ones(len(t_index), dtype=bool)
+    if t0 is not None:
+        mask &= t_index >= t0
+    if t1 is not None:
+        mask &= t_index <= t1
+    return mask
+
+
+def _series_coverage(series: np.ndarray, mask: np.ndarray | None = None) -> float:
+    s = np.asarray(series, dtype=float)
+    if mask is not None:
+        s = s[mask]
+    return float(np.sum(np.isfinite(s))) / max(len(s), 1)
+
+
+def _pick_isotherm_all_stations(
+    iso_candidates: list[float],
+    loaded: dict,
+    t_index: pd.DatetimeIndex,
+    *,
+    t0: pd.Timestamp | None = None,
+    t1: pd.Timestamp | None = None,
+    min_frac: float = DEPTH_COVERAGE_MIN,
+    prefer: float | None = None,
+) -> tuple[float, dict[str, float]]:
+    """Изотерма с наилучшим покрытием z_iso(t) на всех косах в окне."""
+    names = list(loaded.keys())
+    mask = _time_window_mask(t_index, t0, t1)
+    ordered = sorted(iso_candidates, reverse=True)
+    if prefer is not None:
+        ordered = [prefer] + [t for t in ordered if not np.isclose(t, prefer)]
+
+    best_iso, best_score, best_means = None, -1.0, {}
+    for t_iso in ordered:
+        fracs, means = [], {}
+        for name in names:
+            z = _iso_depth_on_index(loaded[name], t_index, t_iso)
+            fracs.append(_series_coverage(z, mask))
+            z_win = z[mask]
+            means[name] = float(np.nanmean(z_win)) if np.any(np.isfinite(z_win)) else np.nan
+        score = min(fracs)
+        if score >= min_frac and score > best_score:
+            best_score = score
+            best_iso = float(t_iso)
+            best_means = means
+
+    if best_iso is None:
+        raise RuntimeError(
+            "Нет изотермы с достаточным покрытием z_iso(t) на всех косах в выбранном окне."
+        )
+    return best_iso, best_means
+
+
+def _iso_tag(t_c: float) -> str:
+    return f"{t_c:.1f}".replace(".", "p")
 
 def _temp_series_at_depth(
     rec: dict,
@@ -534,8 +607,10 @@ def xcorr_stations_surge(
     surge_end: pd.Timestamp,
     max_lag_min: float = 60.0,
     depth_tol_m: float = 0.5,
+    xcorr_iso: float | None = None,
 ):
-    """Задержки между T1–T4: цуг, общие глубины датчиков, сопоставление волн T4."""
+    """Задержки между T1–T4: одна изотерма, z_iso(t) на каждой косе, окно цуга ±1 ч."""
+    del depth_tol_m
     loaded = {}
     for xlsx, sh_dep, sh_time, sh_temp, title in STATIONS:
         t, temps, md, depths_ts = load_station_30s(xlsx, sh_dep, sh_time, sh_temp)
@@ -566,15 +641,27 @@ def xcorr_stations_surge(
     if len(t_common) < 64:
         raise RuntimeError("Мало общего времени в окне ±1 ч вокруг цуга.")
 
-    depth_list = _sensor_depths_all_four(
-        loaded, tol_m=depth_tol_m, t_index=t_common,
-        t0=surge_start, t1=surge_end, min_frac=DEPTH_COVERAGE_MIN,
-    )
-    if not depth_list:
-        raise RuntimeError(
-            "Нет глубин с датчиками на всех четырёх косах и достаточным покрытием в цуге."
+    if xcorr_iso is None:
+        xcorr_iso, z_means_all = _pick_isotherm_all_stations(
+            iso_values,
+            loaded,
+            t_common,
+            t0=surge_start,
+            t1=surge_end,
+            prefer=float(wave_iso),
         )
-    print(f"  Глубины (датчик на T1–T4), м: {depth_list}")
+    else:
+        xcorr_iso = float(xcorr_iso)
+        win_mask = _time_window_mask(t_common, surge_start, surge_end)
+        z_means_all = {
+            name: float(np.nanmean(_iso_depth_on_index(rec, t_common, xcorr_iso)[win_mask]))
+            for name, rec in loaded.items()
+        }
+
+    print(f"  Изотерма для кросс-корр. между косами: {_iso_label(xcorr_iso)}")
+    for name in ("T1", "T2", "T3", "T4"):
+        zm = z_means_all.get(name, np.nan)
+        print(f"    {name}: z̄({_iso_label(xcorr_iso)}) = {zm:.2f} м")
 
     m_surge = (t_common >= surge_start) & (t_common <= surge_end)
     t_surge = t_common[m_surge]
@@ -585,32 +672,22 @@ def xcorr_stations_surge(
     waves = detect_waves(z_shift, dt_seconds=DT_SEC)
     print(f"  Волн на T4 ({_iso_label(wave_iso)}) в цуге: {len(waves)}")
 
-    z_main = depth_list[len(depth_list) // 2]
-    depth_scores = []
-    for z_ref in depth_list:
-        fracs = []
-        for name in ("T1", "T2", "T3", "T4"):
-            s = _temp_series_at_depth(loaded[name], t_surge, z_ref)
-            fracs.append(float(np.sum(np.isfinite(s))) / max(len(s), 1))
-        depth_scores.append((min(fracs), z_ref))
-    z_main = max(depth_scores)[1]
-    print(f"  Глубина для сопоставления волн (макс. покрытие): {z_main:.2f} м")
-
     names = ["T1", "T2", "T3", "T4"]
-    temp_surge = {
-        name: _fill_short_gaps(_temp_series_at_depth(loaded[name], t_surge, z_main))
+    z_common = {
+        name: _fill_short_gaps(_iso_depth_on_index(loaded[name], t_common, xcorr_iso))
         for name in names
     }
+    z_surge = {name: z_common[name][m_surge] for name in names}
     max_lag = int(max_lag_min * 60 / DT_SEC)
     wave_rows = []
     for wnum, (i0, i1, imax, h_m, period_min) in enumerate(waves, start=1):
         half = max(int(0.5 * (i1 - i0)), 8)
         w0 = max(0, imax - half)
         w1 = min(len(z_shift), imax + half + 1)
-        ref = prepare_anomaly(temp_surge["T4"][w0:w1])
+        ref = prepare_anomaly(z_surge["T4"][w0:w1])
         t_evt = t_surge[imax]
         for other in ("T1", "T2", "T3"):
-            seg = prepare_anomaly(temp_surge[other][w0:w1])
+            seg = prepare_anomaly(z_surge[other][w0:w1])
             try:
                 _lags, _corr, r_max, lag_s = normalized_xcorr(
                     ref, seg, max_lag_samples=max_lag,
@@ -623,7 +700,9 @@ def xcorr_stations_surge(
                 "время_T4": t_evt,
                 "H_м": h_m,
                 "T_мин": period_min,
-                "глубина_м": z_main,
+                "изотерма_°C": xcorr_iso,
+                "z_T4_м": z_means_all.get("T4", np.nan),
+                "z_другая_м": z_means_all.get(other, np.nan),
                 "пара": f"T4–{other}",
                 "лаг_мин": lag_min,
                 "r": r_max,
@@ -632,17 +711,19 @@ def xcorr_stations_surge(
     if wave_rows:
         df_w = pd.DataFrame(wave_rows)
         print("\n" + "=" * 60)
-        print("СОПОСТАВЛЕНИЕ ВОЛН ЦУГА МЕЖДУ КОСАМИ")
+        print("СОПОСТАВЛЕНИЕ ВОЛН ЦУГА МЕЖДУ КОСАМИ (глубина одной изотермы)")
         print("=" * 60)
-        print("Положительный лаг: сигнал на второй косе позже T4.")
+        print(
+            f"Ряды: z_iso({_iso_label(xcorr_iso)}), аномалия относительно среднего в цуге."
+        )
+        print("Положительный лаг: смещение изотермы на второй косе позже T4.")
         print(df_w.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
         p_w = SCRIPT_DIR / "xcorr_surge_waves.csv"
         df_w.to_csv(p_w, index=False, encoding="utf-8-sig")
         print(f"\nCSV волн: {p_w}")
 
     series_full = {
-        name: prepare_anomaly(_fill_short_gaps(_temp_series_at_depth(loaded[name], t_common, z_main)))
-        for name in names
+        name: prepare_anomaly(z_common[name]) for name in names
     }
 
     n_st = len(names)
@@ -669,7 +750,7 @@ def xcorr_stations_surge(
     axes[0].set_yticks(range(n_st))
     axes[0].set_xticklabels(names, rotation=35, ha="right")
     axes[0].set_yticklabels(names)
-    axes[0].set_title(f"Одна глубина {z_main:.1f} м — сходство T на косах")
+    axes[0].set_title(f"Изотерма {_iso_label(xcorr_iso)} — сходство z_iso на косах")
     _annotate_matrix(axes[0], r_mat, fmt="{:.2f}")
     cb0 = fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.02)
     cb0.set_label("r")
@@ -683,16 +764,34 @@ def xcorr_stations_surge(
     cb1 = fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.02)
     cb1.set_label("мин")
     fig.suptitle(
-        f"T1–T4, глубина {z_main:.1f} м\n"
+        f"T1–T4, изотерма {_iso_label(xcorr_iso)} (z_iso)\n"
         f"{t_common[0]:%d.%m %H:%M} – {t_common[-1]:%H:%M}, цуг "
         f"{surge_start:%H:%M}–{surge_end:%H:%M}",
         fontsize=10,
     )
-    tag = f"{z_main:.1f}".replace(".", "p")
-    out = SCRIPT_DIR / f"xcorr_surge_z{tag}m.png"
+    tag = _iso_tag(xcorr_iso)
+    out = SCRIPT_DIR / f"xcorr_surge_iso{tag}C.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Матрица на {z_main:.1f} м: {out.name}")
+    print(f"  Матрица изотермы {_iso_label(xcorr_iso)}: {out.name}")
+
+    report_path = SCRIPT_DIR / "xcorr_surge_isotherm_report.txt"
+    rep = [
+        "T1–T4: КРОСС-КОРРЕЛЯЦИЯ ОДНОЙ ИЗОТЕРМЫ МЕЖДУ КОСАМИ",
+        f"Изотерма: {_iso_label(xcorr_iso)}",
+        f"Окно: {t_common[0]:%d.%m.%Y %H:%M} - {t_common[-1]:%d.%m.%Y %H:%M}",
+        f"Цуг: {surge_start:%d.%m.%Y %H:%M} - {surge_end:%H:%M}",
+        f"Поиск волн на T4: {_iso_label(wave_iso)}, макс. лаг +/-{max_lag_min:g} мин",
+        "",
+        "Средняя глубина изотермы в цуге:",
+    ]
+    for name in names:
+        rep.append(f"  {name}: {z_means_all.get(name, np.nan):.2f} м")
+    rep.append("")
+    rep.append("Положительный лаг: z_iso на косе-столбце позже косы-строки.")
+    rep.append(f"График: {out}")
+    report_path.write_text("\n".join(rep), encoding="utf-8")
+    print(f"  Отчёт: {report_path.name}")
 
 
 def xcorr_stations_same_depth(
@@ -832,7 +931,7 @@ def _print_main_menu():
     print("КРОСС-КОРРЕЛЯЦИЯ ТЕРМОКОС")
     print("=" * 60)
     print("  1 - T4: одна коса, изотермы на разных глубинах (лаг, r)")
-    print("  2 - T1–T4: одна глубина, разные косы, цуг ±1 ч (задержка прихода)")
+    print("  2 - T1–T4: одна изотерма z_iso(t), цуг ±1 ч (задержка между косами)")
     print("  3 - Оба расчета")
     print("  0 - Выход")
 
@@ -856,9 +955,13 @@ def run_stations_block():
     surge_start, surge_end = _read_surge_window()
     iso_values = _read_isotherms_st4()
     raw_w = input(
-        f"  Изотерма для поиска волн (Enter = {iso_values[1]:.1f} C): "
+        f"  Изотерма для поиска волн на T4 (Enter = {iso_values[1]:.1f} C): "
     ).strip()
     wave_iso = float(raw_w) if raw_w else float(iso_values[1])
+    raw_x = input(
+        f"  Изотерма для кросс-корр. между косами (Enter = как для волн, {wave_iso:.1f} C): "
+    ).strip()
+    xcorr_iso = float(raw_x) if raw_x else float(wave_iso)
     max_lag_st = _read_max_lag("  Макс. сдвиг по времени, мин", 60.0)
     xcorr_stations_surge(
         iso_values=iso_values,
@@ -866,6 +969,7 @@ def run_stations_block():
         surge_start=surge_start,
         surge_end=surge_end,
         max_lag_min=max_lag_st,
+        xcorr_iso=xcorr_iso,
     )
 
 
